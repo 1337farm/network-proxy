@@ -26,7 +26,7 @@ if [[ -z "$PORT" && -n "${HTTP_PROXY:-}" ]]; then
   PORT="$(echo "$HTTP_PROXY" | sed -E 's|.*:([0-9]+).*|\1|')"
 fi
 HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-8080}"
+PORT="${PORT:-3128}"
 
 echo "== proxy env =="
 echo "HTTP_PROXY=${HTTP_PROXY:-<unset>}"

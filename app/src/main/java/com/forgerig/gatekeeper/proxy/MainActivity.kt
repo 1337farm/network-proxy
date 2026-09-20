@@ -42,7 +42,7 @@ class MainActivity : AppCompatActivity() {
         val metricsCheck = findViewById<MaterialCheckBox>(R.id.metricsCheck)
 
         val refreshScript = {
-            val p = portInput.text.toString().toIntOrNull() ?: 8080
+            val p = portInput.text.toString().toIntOrNull() ?: 3128
             setupScriptText.text = SetupScript.build(this, p)
         }
         portInput.addTextChangedListener(object : android.text.TextWatcher {
