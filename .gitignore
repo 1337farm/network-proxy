@@ -1,0 +1,25 @@
+# Android / Gradle
+.gradle/
+build/
+local.properties
+*.apk
+*.ap_
+*.aab
+*.dex
+local/
+captures/
+
+# Proxy runtime artifacts
+*.jsonl
+proxy-config.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.idea/
+*.iml
