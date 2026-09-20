@@ -13,9 +13,9 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 1_000_001
-        // Human-readable: git short SHA like the parent forge-gatekeeper app.
-        // Prefers GITHUB_SHA in CI, falls back to local `git rev-parse`.
-        versionName = System.getenv("GITHUB_SHA")?.take(8)?.let { "1.0-$it" }
+        // Version name = short git SHA (CI: GITHUB_SHA, local: git rev-parse).
+        // Included in APK filename automatically by the Android plugin.
+        versionName = System.getenv("GITHUB_SHA")?.take(8)
             ?: run {
                 try {
                     val proc = ProcessBuilder("git", "rev-parse", "--short=8", "HEAD")
@@ -23,9 +23,9 @@ android {
                         .start()
                     val sha = proc.inputStream.bufferedReader().readText().trim()
                     proc.waitFor()
-                    if (sha.matches(Regex("[0-9a-f]{8}"))) "1.0-$sha" else "1.0-dev"
+                    if (sha.matches(Regex("[0-9a-f]{8}"))) sha else "dev"
                 } catch (_: Exception) {
-                    "1.0-dev"
+                    "dev"
                 }
             }
     }
