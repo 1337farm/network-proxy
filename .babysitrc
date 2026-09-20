@@ -1,0 +1,11 @@
+# .babysitrc values for network-proxy (KEY=VALUE, sourced by babysit-pr.sh
+# from 1337farm/pr-babysitter v1; install: curl -fsSL
+# https://raw.githubusercontent.com/1337farm/pr-babysitter/v1/babysit-pr.sh).
+# CLI flags (--artifact=… etc.) override these.
+# Phone-facing artifact is the release APK (single-APK install);
+# the same APK rides the `latest` release as network-proxy-<sha>.apk.
+APK_ARTIFACT="NetworkProxy-Release-APK"
+MAIN_WORKFLOW="android.yml"
+RELEASE_TAG="latest"
+APK_GLOB="network-proxy-*.apk"
+LOG_GLOB="*.log"

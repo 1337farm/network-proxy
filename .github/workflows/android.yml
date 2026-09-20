@@ -1,0 +1,130 @@
+name: Android CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Set up JDK 17
+        uses: 1337farm/actions/setup-jdk@v1
+        with:
+          java-version: "17"
+      - name: Set up Android SDK
+        uses: 1337farm/actions/setup-android-env@v1
+      - name: Create local.properties for SDK
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', 'gradle.properties', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+      - name: Run unit tests
+        run: ./gradlew :app:testDebugUnitTest --stacktrace
+
+  package-apk:
+    name: apk
+    runs-on: ubuntu-latest
+    needs: [test]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Set up JDK 17
+        uses: 1337farm/actions/setup-jdk@v1
+        with:
+          java-version: "17"
+      - name: Set up Android SDK
+        uses: 1337farm/actions/setup-android-env@v1
+      - name: Create local.properties for SDK
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+      - name: Grant execute permission
+        run: chmod +x gradlew
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', 'gradle.properties', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+      - name: Assemble debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace
+      - name: Assemble release APK
+        run: ./gradlew :app:assembleRelease --stacktrace
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: NetworkProxy-Debug-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+      - name: Upload release APK artifact
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: NetworkProxy-Release-APK
+          path: app/build/outputs/apk/release/app-release.apk
+          retention-days: 30
+      - name: Publish rolling latest release
+        if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/proxy-release"
+          mkdir -p "$OUT"
+          APK="$(find app/build/outputs/apk/release -name 'app-release.apk' | head -1)"
+          [ -n "$APK" ] || { echo "ERROR: no app-release.apk to publish"; exit 1; }
+          SHA="$(printf '%s' "$GITHUB_SHA" | cut -c1-8)"
+          APK_NAME="network-proxy-$SHA.apk"
+          cp "$APK" "$OUT/$APK_NAME"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          sum() { sha256sum "$1" | cut -d' ' -f1; }
+          printf '{"commit":"%s","built_at":"%s","files":{"%s":"%s"}}\n' "$SHA" "$DATE" "$APK_NAME" "$(sum "$OUT/$APK_NAME")" > "$OUT/apk-manifest.json"
+          gh release delete latest --yes --cleanup-tag --repo "${{ github.repository }}" 2>/dev/null || true
+          gh release create latest $OUT/* --repo "${{ github.repository }}" \
+            --title "NetworkProxy APK (latest)" \
+            --notes "Rolling release: single-APK foreground proxy app with absorbing-retry policy. Re-published from green main."
+
+  automerge:
+    name: Auto-merge PR
+    needs: [package-apk]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      pull-requests: write
+      contents: write
+      actions: write
+    steps:
+      - name: Merge PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --squash --delete-branch
+      - name: Rebuild and republish latest from main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run android.yml --repo "${{ github.repository }}" --ref main
