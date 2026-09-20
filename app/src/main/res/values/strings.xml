@@ -17,4 +17,5 @@
     <string name="active_sessions">Active Sessions: %1$d</string>
     <string name="export_metrics">Export Metrics</string>
     <string name="clear_metrics">Clear Metrics</string>
+    <string name="expand">Expand</string>
 </resources>
