@@ -78,10 +78,10 @@ object SetupScript {
             |fi
             |rm -f /tmp/network-proxy.pid /tmp/flaky.pid /tmp/proxy18080.pid 2>/dev/null
             |pkill -f "flaky.py" 2>/dev/null && echo "Killed flaky test server" || true
-            |METRICS_FILE="${PROXY_METRICS_FILE:-$HOME/.cache/network-proxy/metrics.jsonl}"
-            |if [[ -f "$METRICS_FILE" ]]; then
-            |  > "$METRICS_FILE"
-            |  echo "Cleared metrics: $METRICS_FILE"
+            |if [ -n "${"$"}{PROXY_METRICS_FILE:-}" ]; then METRICS_FILE="${"$"}PROXY_METRICS_FILE"; else METRICS_FILE="${"$"}HOME/.cache/network-proxy/metrics.jsonl"; fi
+            |if [[ -f "${"$"}METRICS_FILE" ]]; then
+            |  > "${"$"}METRICS_FILE"
+            |  echo "Cleared metrics: ${"$"}METRICS_FILE"
             |fi
             |unset HTTP_PROXY HTTPS_PROXY NO_PROXY
             |echo "Unset HTTP_PROXY, HTTPS_PROXY, NO_PROXY"
