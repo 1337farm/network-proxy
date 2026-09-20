@@ -8,7 +8,7 @@
 #
 # What it does (proxy.py backend):
 #   1. Ensures `proxy.py` is installed for python3.14.
-#   2. Starts it on --port (default 8080) with proxy_retry_plugin (nohup, pidfile).
+#   2. Starts it on --port (default 3128) with proxy_retry_plugin (nohup, pidfile).
 #   3. Probes http + https through it (fails fast with a clear message).
 #   4. Persists HTTP_PROXY/HTTPS_PROXY/NO_PROXY to your shell rc (opt-out with --no-persist).
 #   5. Patches opencode.jsonc retry policy to proxy-owned values
@@ -24,7 +24,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND="proxy.py"
 HOST=""
-PORT="8080"
+PORT="3128"
 RC=""
 MAX_RETRIES="3"
 RETRY_DELAY="2000"
