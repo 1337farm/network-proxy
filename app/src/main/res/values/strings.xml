@@ -18,4 +18,7 @@
     <string name="export_metrics">Export Metrics</string>
     <string name="clear_metrics">Clear Metrics</string>
     <string name="expand">Expand</string>
+    <string name="cleanup_script_title">Terminal cleanup script</string>
+    <string name="cleanup_script_hint">Copy and paste into Termux / proot Ubuntu to remove proxy env, kill daemon, clear metrics.</string>
+    <string name="copy_cleanup_script">Copy cleanup script</string>
 </resources>

@@ -4,11 +4,10 @@ import android.content.Context
 import android.net.wifi.WifiManager
 import java.net.NetworkInterface
 
-/** Builds the copy-paste terminal script that routes opencode through this proxy. */
+/** Builds copy-paste terminal scripts for proot Ubuntu. */
 object SetupScript {
 
     fun lanIp(context: Context): String {
-        // Prefer WiFi manager IP (little-endian int on most devices).
         try {
             val wifi = context.applicationContext.getSystemService(WifiManager::class.java)
             val ip = wifi?.connectionInfo?.ipAddress ?: 0
@@ -17,7 +16,6 @@ object SetupScript {
                     .joinToString(".")
             }
         } catch (_: Exception) {}
-        // Fallback: first non-loopback IPv4 interface.
         try {
             NetworkInterface.getNetworkInterfaces()?.toList()
                 ?.flatMap { it.inetAddresses.toList() }
@@ -47,6 +45,49 @@ object SetupScript {
             |print('opencode.jsonc: maxRetries=3 retryDelay=2000')
             |"
             |python3 -c "import socket; s=socket.create_connection(('127.0.0.1',${port}), timeout=5); s.close(); print('proxy probe: listening on 127.0.0.1:${port}')"
+        """.trimMargin()
+    }
+
+    fun cleanup(): String {
+        return """
+            |# >>> network-proxy cleanup (run in proot Ubuntu) >>>
+            |if [[ -f ~/.bashrc ]]; then
+            |  python3 - ~/.bashrc <<'PYEOF'
+            |import sys
+            |rc = sys.argv[1]
+            |begin, end = "# >>> network-proxy", "# <<< network-proxy"
+            |lines = open(rc).read().splitlines(keepends=True)
+            |out, skipping = [], False
+            |for ln in lines:
+            |    if begin in ln:
+            |        skipping = True
+            |        continue
+            |    if end in ln:
+            |        skipping = False
+            |        continue
+            |    if not skipping:
+            |        out.append(ln)
+            |open(rc, "w").writelines(out)
+            |PYEOF
+            |  echo "Removed proxy env block from ~/.bashrc"
+            |fi
+            |if [[ -f /tmp/network-proxy.pid ]] && kill "$(cat /tmp/network-proxy.pid)" 2>/dev/null; then
+            |  echo "Killed proxy daemon (pid $(cat /tmp/network-proxy.pid))"
+            |else
+            |  pkill -f "proxy --port 3128" 2>/dev/null && echo "Killed proxy daemon on port 3128" || true
+            |fi
+            |rm -f /tmp/network-proxy.pid /tmp/flaky.pid /tmp/proxy18080.pid 2>/dev/null
+            |pkill -f "flaky.py" 2>/dev/null && echo "Killed flaky test server" || true
+            |if [ -n "${"$"}{PROXY_METRICS_FILE:-}" ]; then METRICS_FILE="${"$"}PROXY_METRICS_FILE"; else METRICS_FILE="${"$"}HOME/.cache/network-proxy/metrics.jsonl"; fi
+            |if [[ -f "${"$"}METRICS_FILE" ]]; then
+            |  > "${"$"}METRICS_FILE"
+            |  echo "Cleared metrics: ${"$"}METRICS_FILE"
+            |fi
+            |unset HTTP_PROXY HTTPS_PROXY NO_PROXY
+            |echo "Unset HTTP_PROXY, HTTPS_PROXY, NO_PROXY"
+            |echo "=== Cleanup complete ==="
+            |echo "Run 'source ~/.bashrc' or open a new terminal to fully apply."
+            |# <<< network-proxy cleanup <<<
         """.trimMargin()
     }
 }
