@@ -12,7 +12,17 @@ android {
         applicationId = "com.forgerig.gatekeeper.proxy"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1_000_001
+        versionCode = run {
+                try {
+                    val proc = ProcessBuilder("git", "rev-list", "--count", "HEAD")
+                        .redirectErrorStream(true)
+                        .start()
+                    val count = proc.inputStream.bufferedReader().readText().trim().toIntOrNull()
+                    proc.waitFor()
+                    if (count != null && count > 0) count * 1_000 + 1
+                    else 1_000_001
+                } catch (_: Exception) { 1_000_001 }
+            }
         // Version name = short git SHA (CI: GITHUB_SHA, local: git rev-parse).
         // Included in APK filename automatically by the Android plugin.
         versionName = System.getenv("GITHUB_SHA")?.take(8)
@@ -30,19 +40,10 @@ android {
             }
     }
 
-    signingConfigs {
-        create("release") {
-            storeFile = file(System.getenv("KEYSTORE_PATH") ?: System.getProperty("user.home") + "/.android/debug.keystore")
-            storePassword = System.getenv("KEYSTORE_PASSWORD") ?: "android"
-            keyAlias = System.getenv("KEY_ALIAS") ?: "androiddebugkey"
-            keyPassword = System.getenv("KEY_PASSWORD") ?: "android"
-        }
-    }
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {
