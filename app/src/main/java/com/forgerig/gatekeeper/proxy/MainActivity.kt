@@ -43,12 +43,16 @@ class MainActivity : AppCompatActivity() {
         val setupScriptText = findViewById<TextView>(R.id.setupScriptText)
         val setupScriptScrollView = findViewById<android.widget.HorizontalScrollView>(R.id.setupScriptScrollView)
         val setupScriptExpandIcon = findViewById<ImageView>(R.id.setupScriptExpandIcon)
+        val copyCleanupButton = findViewById<MaterialButton>(R.id.copyCleanupButton)
+        val cleanupScriptText = findViewById<TextView>(R.id.cleanupScriptText)
+        val cleanupScriptScrollView = findViewById<android.widget.HorizontalScrollView>(R.id.cleanupScriptScrollView)
         val portInput = findViewById<TextInputEditText>(R.id.portInput)
         val metricsCheck = findViewById<MaterialCheckBox>(R.id.metricsCheck)
 
         val refreshScript = {
             val p = portInput.text.toString().toIntOrNull() ?: 3128
             setupScriptText.text = SetupScript.build(this, p)
+            cleanupScriptText.text = SetupScript.cleanup()
         }
         portInput.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
@@ -96,6 +100,13 @@ class MainActivity : AppCompatActivity() {
             val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             cm.setPrimaryClip(ClipData.newPlainText("opencode-proxy-setup", script))
             Toast.makeText(this, "Setup script copied — paste it into your terminal", Toast.LENGTH_LONG).show()
+        }
+
+        copyCleanupButton.setOnClickListener {
+            val script = cleanupScriptText.text.toString()
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("opencode-proxy-cleanup", script))
+            Toast.makeText(this, "Cleanup script copied — paste it into your terminal", Toast.LENGTH_LONG).show()
         }
 
         exportButton.setOnClickListener {
