@@ -7,6 +7,8 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.View
+import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -19,6 +21,7 @@ import com.google.android.material.checkbox.MaterialCheckBox
 class MainActivity : AppCompatActivity() {
 
     private lateinit var viewModel: ProxyViewModel
+    private var setupScriptExpanded = false
     private val statsHandler = Handler(Looper.getMainLooper())
     private val statsPoller = object : Runnable {
         override fun run() {
@@ -38,6 +41,8 @@ class MainActivity : AppCompatActivity() {
         val exportButton = findViewById<MaterialButton>(R.id.exportButton)
         val copyScriptButton = findViewById<MaterialButton>(R.id.copyScriptButton)
         val setupScriptText = findViewById<TextView>(R.id.setupScriptText)
+        val setupScriptScrollView = findViewById<android.widget.HorizontalScrollView>(R.id.setupScriptScrollView)
+        val setupScriptExpandIcon = findViewById<ImageView>(R.id.setupScriptExpandIcon)
         val portInput = findViewById<TextInputEditText>(R.id.portInput)
         val metricsCheck = findViewById<MaterialCheckBox>(R.id.metricsCheck)
 
@@ -51,6 +56,19 @@ class MainActivity : AppCompatActivity() {
             override fun afterTextChanged(s: android.text.Editable?) = refreshScript()
         })
         refreshScript()
+
+        val toggleExpand = {
+            setupScriptExpanded = !setupScriptExpanded
+            setupScriptScrollView.visibility = if (setupScriptExpanded) View.VISIBLE else View.GONE
+            setupScriptExpandIcon.setImageResource(
+                if (setupScriptExpanded) android.R.drawable.arrow_up_float else android.R.drawable.arrow_down_float
+            )
+        }
+
+        // Header click expands/collapses
+        val headerLayout = setupScriptExpandIcon.parent as? android.view.ViewGroup
+        headerLayout?.setOnClickListener { toggleExpand() }
+        setupScriptExpandIcon.setOnClickListener { toggleExpand() }
 
         // Observe running state (survives rotation via ViewModel).
         // isRunning is service-authoritative via the binder state callback.
