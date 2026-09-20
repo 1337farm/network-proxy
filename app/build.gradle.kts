@@ -40,9 +40,24 @@ android {
             }
     }
 
+    signingConfigs {
+        // Release signing: CI generates ~/.android/debug.keystore before
+        // assembleRelease; use it via env overrides so the release APK is
+        // actually produced (unsigned release variant is skipped by AGP,
+        // which broke the rolling `latest` publish).
+        val homeDir = System.getenv("HOME") ?: System.getProperty("user.home")
+        create("ciDebug") {
+            storeFile = file(System.getenv("DEBUG_KEYSTORE") ?: "$homeDir/.android/debug.keystore")
+            storePassword = System.getenv("DEBUG_STORE_PASSWORD") ?: "android"
+            keyAlias = System.getenv("DEBUG_KEY_ALIAS") ?: "androiddebugkey"
+            keyPassword = System.getenv("DEBUG_KEY_PASSWORD") ?: "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("ciDebug")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
