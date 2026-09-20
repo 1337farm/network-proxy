@@ -41,11 +41,15 @@ class MainActivity : AppCompatActivity() {
         val exportButton = findViewById<MaterialButton>(R.id.exportButton)
         val copyScriptButton = findViewById<MaterialButton>(R.id.copyScriptButton)
         val setupScriptText = findViewById<TextView>(R.id.setupScriptText)
-        val setupScriptScrollView = findViewById<android.widget.HorizontalScrollView>(R.id.setupScriptScrollView)
+        val setupScriptScrollView = findViewById<android.widget.ScrollView>(R.id.setupScriptScrollView)
         val setupScriptExpandIcon = findViewById<ImageView>(R.id.setupScriptExpandIcon)
+        val setupScriptHeader = findViewById<android.view.View>(R.id.setupScriptHeader)
         val copyCleanupButton = findViewById<MaterialButton>(R.id.copyCleanupButton)
         val cleanupScriptText = findViewById<TextView>(R.id.cleanupScriptText)
-        val cleanupScriptScrollView = findViewById<android.widget.HorizontalScrollView>(R.id.cleanupScriptScrollView)
+        val cleanupScriptScrollView = findViewById<android.widget.ScrollView>(R.id.cleanupScriptScrollView)
+        val cleanupScriptExpandIcon = findViewById<ImageView>(R.id.cleanupScriptExpandIcon)
+        val cleanupScriptHeader = findViewById<android.view.View>(R.id.cleanupScriptHeader)
+        var cleanupScriptExpanded = false
         val portInput = findViewById<TextInputEditText>(R.id.portInput)
         val metricsCheck = findViewById<MaterialCheckBox>(R.id.metricsCheck)
 
@@ -69,10 +73,19 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
+        val toggleCleanupExpand = {
+            cleanupScriptExpanded = !cleanupScriptExpanded
+            cleanupScriptScrollView.visibility = if (cleanupScriptExpanded) View.VISIBLE else View.GONE
+            cleanupScriptExpandIcon.setImageResource(
+                if (cleanupScriptExpanded) android.R.drawable.arrow_up_float else android.R.drawable.arrow_down_float
+            )
+        }
+
         // Header click expands/collapses
-        val headerLayout = setupScriptExpandIcon.parent as? android.view.ViewGroup
-        headerLayout?.setOnClickListener { toggleExpand() }
+        setupScriptHeader.setOnClickListener { toggleExpand() }
         setupScriptExpandIcon.setOnClickListener { toggleExpand() }
+        cleanupScriptHeader.setOnClickListener { toggleCleanupExpand() }
+        cleanupScriptExpandIcon.setOnClickListener { toggleCleanupExpand() }
 
         // Observe running state (survives rotation via ViewModel).
         // isRunning is service-authoritative via the binder state callback.

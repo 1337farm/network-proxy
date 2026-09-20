@@ -194,10 +194,10 @@
                 style="@style/Widget.Material3.Button.OutlinedButton"/>
 
             <com.google.android.material.card.MaterialCardView
+                android:id="@+id/setupScriptCard"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="16dp"
-                android:layout_marginBottom="100dp"
                 app:cardCornerRadius="12dp">
 
                 <LinearLayout
@@ -207,10 +207,13 @@
                     android:padding="16dp">
 
                     <LinearLayout
+                        android:id="@+id/setupScriptHeader"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:orientation="horizontal"
-                        android:gravity="center_vertical">
+                        android:gravity="center_vertical"
+                        android:clickable="true"
+                        android:focusable="true">
 
                         <TextView
                             android:layout_width="0dp"
@@ -222,19 +225,11 @@
 
                         <ImageView
                             android:id="@+id/setupScriptExpandIcon"
-                            android:layout_width="24dp"
-                            android:layout_height="24dp"
-                            android:layout_marginStart="8dp"
+                            android:layout_width="32dp"
+                            android:layout_height="32dp"
+                            android:padding="4dp"
                             android:src="@android:drawable/arrow_down_float"
                             android:contentDescription="@string/expand"/>
-
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/copyScriptButton"
-                            android:layout_width="wrap_content"
-                            android:layout_height="36dp"
-                            android:layout_marginStart="8dp"
-                            android:text="@string/copy_setup_script"
-                            style="@style/Widget.Material3.Button.TextButton.Icon"/>
                     </LinearLayout>
 
                     <TextView
@@ -244,30 +239,46 @@
                         android:textSize="12sp"
                         android:layout_marginTop="4dp"/>
 
-                    <HorizontalScrollView
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/copyScriptButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/copy_setup_script"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        app:icon="@android:drawable/ic_menu_save"/>
+
+                    <ScrollView
                         android:id="@+id/setupScriptScrollView"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
+                        android:maxHeight="280dp"
                         android:layout_marginTop="8dp"
                         android:background="#11000000"
                         android:visibility="gone">
 
-                        <TextView
-                            android:id="@+id/setupScriptText"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:padding="8dp"
-                            android:textSize="11sp"
-                            android:fontFamily="monospace"
-                            android:textIsSelectable="true"/>
-                    </HorizontalScrollView>
+                        <HorizontalScrollView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content">
+
+                            <TextView
+                                android:id="@+id/setupScriptText"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:padding="8dp"
+                                android:textSize="11sp"
+                                android:fontFamily="monospace"
+                                android:textIsSelectable="true"/>
+                        </HorizontalScrollView>
+                    </ScrollView>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
             <com.google.android.material.card.MaterialCardView
+                android:id="@+id/cleanupScriptCard"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
+                android:layout_marginTop="12dp"
                 android:layout_marginBottom="100dp"
                 app:cardCornerRadius="12dp">
 
@@ -278,10 +289,13 @@
                     android:padding="16dp">
 
                     <LinearLayout
+                        android:id="@+id/cleanupScriptHeader"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:orientation="horizontal"
-                        android:gravity="center_vertical">
+                        android:gravity="center_vertical"
+                        android:clickable="true"
+                        android:focusable="true">
 
                         <TextView
                             android:layout_width="0dp"
@@ -291,13 +305,13 @@
                             android:textSize="16sp"
                             android:textStyle="bold"/>
 
-                        <com.google.android.material.button.MaterialButton
-                            android:id="@+id/copyCleanupButton"
-                            android:layout_width="wrap_content"
-                            android:layout_height="36dp"
-                            android:layout_marginStart="8dp"
-                            android:text="@string/copy_cleanup_script"
-                            style="@style/Widget.Material3.Button.TextButton.Icon"/>
+                        <ImageView
+                            android:id="@+id/cleanupScriptExpandIcon"
+                            android:layout_width="32dp"
+                            android:layout_height="32dp"
+                            android:padding="4dp"
+                            android:src="@android:drawable/arrow_down_float"
+                            android:contentDescription="@string/expand"/>
                     </LinearLayout>
 
                     <TextView
@@ -307,23 +321,38 @@
                         android:textSize="12sp"
                         android:layout_marginTop="4dp"/>
 
-                    <HorizontalScrollView
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/copyCleanupButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/copy_cleanup_script"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        app:icon="@android:drawable/ic_menu_save"/>
+
+                    <ScrollView
                         android:id="@+id/cleanupScriptScrollView"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
+                        android:maxHeight="280dp"
                         android:layout_marginTop="8dp"
                         android:background="#11000000"
                         android:visibility="gone">
 
-                        <TextView
-                            android:id="@+id/cleanupScriptText"
-                            android:layout_width="wrap_content"
+                        <HorizontalScrollView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content">
+
+                            <TextView
+                                android:id="@+id/cleanupScriptText"
+                                android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:padding="8dp"
                             android:textSize="11sp"
                             android:fontFamily="monospace"
                             android:textIsSelectable="true"/>
-                    </HorizontalScrollView>
+                        </HorizontalScrollView>
+                    </ScrollView>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
         </LinearLayout>
