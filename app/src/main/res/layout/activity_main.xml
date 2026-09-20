@@ -206,12 +206,36 @@
                     android:orientation="vertical"
                     android:padding="16dp">
 
-                    <TextView
+                    <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="@string/setup_script_title"
-                        android:textSize="16sp"
-                        android:textStyle="bold"/>
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <TextView
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/setup_script_title"
+                            android:textSize="16sp"
+                            android:textStyle="bold"/>
+
+                        <ImageView
+                            android:id="@+id/setupScriptExpandIcon"
+                            android:layout_width="24dp"
+                            android:layout_height="24dp"
+                            android:layout_marginStart="8dp"
+                            android:src="@android:drawable/arrow_down_float"
+                            android:contentDescription="@string/expand"/>
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/copyScriptButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="36dp"
+                            android:layout_marginStart="8dp"
+                            android:text="@string/copy_setup_script"
+                            style="@style/Widget.Material3.Button.TextButton.Icon"/>
+                    </LinearLayout>
 
                     <TextView
                         android:layout_width="match_parent"
@@ -221,10 +245,12 @@
                         android:layout_marginTop="4dp"/>
 
                     <HorizontalScrollView
+                        android:id="@+id/setupScriptScrollView"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
-                        android:background="#11000000">
+                        android:background="#11000000"
+                        android:visibility="gone">
 
                         <TextView
                             android:id="@+id/setupScriptText"
@@ -235,13 +261,6 @@
                             android:fontFamily="monospace"
                             android:textIsSelectable="true"/>
                     </HorizontalScrollView>
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/copyScriptButton"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:text="@string/copy_setup_script"/>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
         </LinearLayout>
