@@ -247,11 +247,7 @@ class ProxyService : Service() {
                                 routeLeg = leg
                                 bj.put("model", leg.model)
                                 body = bj.toString().toByteArray(Charsets.UTF_8)
-                                val old = java.net.URL(targetUrl)
-                                targetUrl = java.net.URL(
-                                    old.protocol, java.net.URL(lp.baseUrl).host,
-                                    java.net.URL(lp.baseUrl).port, old.file
-                                ).toString()
+                                targetUrl = ProviderStore.retarget(targetUrl, lp.baseUrl)
                                 headers.keys.filter {
                                     it.equals("Content-Length", true)
                                 }.forEach { headers.remove(it) }
@@ -278,9 +274,7 @@ class ProxyService : Service() {
             val host = try { java.net.URL(targetUrl).host.lowercase() } catch (_: Exception) { "" }
             val reqBytes = (body?.size ?: 0).toLong()
             val store = ProviderBroker.store(this)
-            val provider = store.providers.values.firstOrNull { p ->
-                try { java.net.URL(p.baseUrl).host.lowercase() == host } catch (_: Exception) { false }
-            }
+            val provider = ProviderStore.matchProvider(store, targetUrl)
             var keyCtx: Pair<ProviderStore.Provider, ProviderStore.ApiKey>? =
                 if (provider != null) store.activeKey(provider.id) else null
             if (provider != null && keyCtx == null && store.keyRolloverEnabled) {
@@ -797,11 +791,7 @@ class ProxyService : Service() {
                 val bj = org.json.JSONObject(body.toString(Charsets.UTF_8))
                 bj.put("model", next.model)
                 val nb = bj.toString().toByteArray(Charsets.UTF_8)
-                val old = java.net.URL(url)
-                val nu = java.net.URL(
-                    old.protocol, java.net.URL(lp.baseUrl).host,
-                    java.net.URL(lp.baseUrl).port, old.file
-                ).toString()
+                val nu = ProviderStore.retarget(url, lp.baseUrl)
                 headers["Content-Length"] = nb.size.toString()
                 mutableHeaders["Content-Length"] = nb.size.toString()
                 ProxyMetrics.event("Leg failover '$wantModel' → ${lp.id}/${next.model}")
