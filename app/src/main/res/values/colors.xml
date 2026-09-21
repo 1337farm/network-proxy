@@ -12,9 +12,9 @@
     <color name="violet_900">#FF2A1650</color>
 
     <!-- M3 dark roles (violet seed, tuned for plum surfaces) -->
-    <color name="brand_primary">#FFCDB9FF</color>
-    <color name="brand_on_primary">#FF2A1650</color>
-    <color name="brand_primary_container">#FF4A2E8A</color>
+    <color name="brand_primary">#FFB9A3F8</color>
+    <color name="brand_on_primary">#FF241040</color>
+    <color name="brand_primary_container">#FF3F2475</color>
     <color name="brand_on_primary_container">#FFEADDFF</color>
     <color name="brand_secondary">#FFB3A8D6</color>
     <color name="brand_tertiary">#FFD3A6E0</color>
@@ -36,11 +36,11 @@
     <color name="status_on_error">#FF601410</color>
 
     <!-- Section titles: soft lavender, quieter than primary -->
-    <color name="title_violet">#FFC3B2F5</color>
+    <color name="title_violet">#FFAC99F1</color>
     <color name="hint_text">#FFA79FC0</color>
 
     <!-- Legacy names kept for compatibility, retuned into the system -->
-    <color name="purple_200">#FFCDB9FF</color>
+    <color name="purple_200">#FFB9A3F8</color>
     <color name="purple_500">#FF8B5CF6</color>
     <color name="purple_700">#FF5E35B1</color>
     <color name="purple_900">#FF2A1650</color>
