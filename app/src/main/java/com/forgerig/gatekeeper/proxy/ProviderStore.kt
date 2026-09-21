@@ -149,7 +149,52 @@ class ProviderStore private constructor() {
             Provider("openrouter", "https://openrouter.ai/api/v1", "Authorization", "Bearer "),
             Provider("deepseek", "https://api.deepseek.com", "Authorization", "Bearer "),
             Provider("glm", "https://open.bigmodel.cn/api/paas/v4", "Authorization", "Bearer "),
+            // NVIDIA NIM cloud: OpenAI-compatible, Bearer key from build.nvidia.com.
+            Provider("nvidia", "https://integrate.api.nvidia.com/v1", "Authorization", "Bearer "),
+            // OpenCode Zen gateway. Anthropic-shaped traffic goes to the
+            // /messages endpoint with x-api-key; OpenAI-shaped traffic to
+            // the gateway root with Bearer. Longest-prefix match wins.
+            Provider("opencode-zen-messages", "https://opencode.ai/zen/v1/messages", "x-api-key"),
+            Provider("opencode-zen", "https://opencode.ai/zen/v1", "Authorization", "Bearer "),
         )
+
+        /**
+         * Longest baseUrl-prefix match for [targetUrl]. Path-aware so
+         * gateway sub-endpoints (e.g. Zen /messages vs root) resolve to the
+         * right credential style.
+         */
+        fun matchProvider(store: ProviderStore, targetUrl: String): Provider? {
+            var best: Provider? = null
+            var bestLen = -1
+            for (p in store.providers.values) {
+                val base = p.baseUrl.trimEnd('/')
+                if (targetUrl.startsWith(base, ignoreCase = true) && base.length > bestLen) {
+                    // Guard: prefix must end on a path boundary.
+                    val rest = targetUrl.substring(base.length)
+                    if (rest.isEmpty() || rest[0] == '/' || rest[0] == '?') {
+                        best = p
+                        bestLen = base.length
+                    }
+                }
+            }
+            return best
+        }
+
+        /**
+         * Retarget [oldUrl] onto the leg provider: keep the request path,
+         * avoiding duplication when the base already carries it.
+         */
+        fun retarget(oldUrl: String, legBaseUrl: String): String {
+            val old = java.net.URL(oldUrl)
+            val leg = java.net.URL(legBaseUrl.trimEnd('/'))
+            var path = old.file.ifEmpty { "/" }
+            val basePath = leg.path.trimEnd('/')
+            if (basePath.isNotEmpty() && path.startsWith(basePath)) {
+                path = path.substring(basePath.length).ifEmpty { "/" }
+            }
+            val newPath = basePath + (if (path.startsWith("/")) path else "/$path")
+            return java.net.URL(old.protocol, leg.host, leg.port, newPath).toString()
+        }
     }
 
     fun save(context: Context) = CredentialVault.save(context, toJson())
