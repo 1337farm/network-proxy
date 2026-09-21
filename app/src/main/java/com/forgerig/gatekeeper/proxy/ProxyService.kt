@@ -69,6 +69,12 @@ class ProxyService : Service() {
     fun getStats(): Triple<Long, Long, Int> =
         Triple(requestCount.get(), bytesOut.get(), inFlight.get())
 
+    /** Zero the cumulative counters. inFlight is a live gauge, left alone. */
+    fun resetStats() {
+        requestCount.set(0)
+        bytesOut.set(0)
+    }
+
     fun setStateCallback(callback: (Boolean, String?) -> Unit) {
         stateCallback = callback
     }
