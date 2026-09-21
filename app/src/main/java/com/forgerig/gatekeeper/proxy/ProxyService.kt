@@ -47,7 +47,7 @@ class ProxyService : Service() {
     @Volatile private var lastError: String? = null
     private var port = 8080
     private var metricsEnabled = true
-    private var mitmEnabled = true
+    private var mitmEnabled = false
     private var client: OkHttpClient? = null
     private var serverThread: Thread? = null
     private var pool = Executors.newFixedThreadPool(POOL_SIZE)
@@ -93,7 +93,7 @@ class ProxyService : Service() {
         }
         port = intent?.getIntExtra("port", 8080) ?: 8080
         metricsEnabled = intent?.getBooleanExtra("metricsEnabled", true) ?: true
-        mitmEnabled = intent?.getBooleanExtra("mitmEnabled", true) ?: true
+        mitmEnabled = intent?.getBooleanExtra("mitmEnabled", false) ?: false
 
         if (running.get() == 1) {
             ProxyMetrics.event("Restart requested on :$port — draining old listener")
@@ -212,6 +212,19 @@ class ProxyService : Service() {
                     if (key.equals("Retry-After", true)) retryAfterHeaders.add(value)
                 }
                 line = readLine(rawIn)
+            }
+
+            // Local CA fetch: `curl http://127.0.0.1:<port>/ca.pem` serves
+            // the MITM CA PEM directly — no manual Export step needed.
+            // Matches absolute-form (proxied) and origin-form (direct to
+            // the listening port, incl. --noproxy '*'), but ONLY when the
+            // request is addressed at us (loopback host): a proxied
+            // GET http://example.com/ca.pem must still go upstream.
+            // Handled here, before any upstream forwarding, so it never
+            // leaks upstream.
+            if (method == "GET" && isLocalCaRequest(url)) {
+                serveCaPem(output, sessionId, requestId)
+                return
             }
 
             var body: ByteArray? = null
@@ -488,10 +501,12 @@ class ProxyService : Service() {
         val hostPort = authority.split(":")
         val host = hostPort[0]
         val port = hostPort.getOrNull(1)?.toIntOrNull() ?: 443
-        // Opt-in HTTPS split: terminate client TLS with our local CA leaf,
-        // re-originate verified TLS upstream, scan plaintext usage blocks.
-        // Needs the CA installed client-side (setup script); otherwise the
-        // client aborts the handshake and we fall back to opaque tunneling.
+        // Opt-in HTTPS split (Decrypt-HTTPS toggle): terminate client TLS
+        // with our local CA leaf, re-originate verified TLS upstream, scan
+        // plaintext usage blocks. Needs the CA installed client-side
+        // (setup script curls /ca.pem); otherwise the client aborts the
+        // handshake and we fall back to opaque tunneling — so tooling that
+        // never installed the CA keeps working byte-for-byte.
         if (mitmEnabled && handleConnectMitm(clientSocket, clientIn, clientOut, host, port, sessionId, requestId, startedAt)) {
             return
         }
@@ -758,6 +773,68 @@ class ProxyService : Service() {
 
     fun setStatsCallback(callback: (Int, Long, Int, Int) -> Unit) {
         statsCallback = callback
+    }
+
+    // ---- Local CA endpoint (curl-able) ----
+    /**
+     * True for requests addressed at THIS proxy asking for the CA:
+     * origin-form `/ca.pem`, or absolute-form with a loopback host
+     * (127.0.0.1/localhost/::1, any port) and path /ca.pem.
+     * Anything else — incl. `GET http://example.com/ca.pem` — is a
+     * normal proxied request and must go upstream.
+     * Logic lives in [CaEndpoint] (unit-tested); kept here as a thin
+     * delegate so existing call sites don't churn.
+     */
+    internal fun isLocalCaRequest(target: String): Boolean = CaEndpoint.isLocalCaRequest(target)
+
+    /** Path component of an origin-form or absolute-form request target. */
+    internal fun caPathOf(target: String): String? = CaEndpoint.pathOf(target)
+
+    /** Serve the MITM CA PEM inline; never forwards upstream. */
+    private fun serveCaPem(
+        output: java.io.OutputStream,
+        sessionId: String,
+        requestId: String
+    ) {
+        try {
+            val pem = MitmCa.caPem(this)
+            if (pem == null) {
+                val msg = "CA unavailable"
+                val head = "HTTP/1.1 503 Service Unavailable\r\n" +
+                    "Content-Type: text/plain\r\n" +
+                    "Content-Length: ${msg.toByteArray().size}\r\n" +
+                    "Connection: close\r\n\r\n"
+                output.write(head.toByteArray())
+                output.write(msg.toByteArray())
+                output.flush()
+                if (metricsEnabled) ProxyMetrics.recordRequestEnd(
+                    sessionId, requestId, 503, 0, NetworkScenario.UNKNOWN
+                )
+                return
+            }
+            val body = pem.toByteArray(Charsets.UTF_8)
+            val head = "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: application/x-pem-file\r\n" +
+                "Content-Length: ${body.size}\r\n" +
+                "Connection: close\r\n\r\n"
+            output.write(head.toByteArray())
+            output.write(body)
+            output.flush()
+            requestCount.incrementAndGet()
+            bytesOut.addAndGet(body.size.toLong())
+            if (metricsEnabled) ProxyMetrics.recordRequestEnd(
+                sessionId, requestId, 200, body.size.toLong(), NetworkScenario.SUCCESS
+            )
+            ProxyMetrics.event("Served local CA (${humanBytesShort(body.size.toLong())})")
+        } catch (e: Exception) {
+            try {
+                output.write("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".toByteArray())
+                output.flush()
+            } catch (_: Exception) {}
+            if (metricsEnabled) ProxyMetrics.recordRequestEnd(
+                sessionId, requestId, 500, 0, NetworkScenario.UNKNOWN
+            )
+        }
     }
 
     // ---- Key-broker helpers ----
