@@ -39,14 +39,39 @@ object SetupScript {
             |export NO_PROXY="localhost,127.0.0.1"
             |# Persist the same env into ~/.bashrc inside fenced markers, so
             |# the cleanup script can find and remove exactly this block.
-            |# The grep guard keeps repeat runs from appending duplicates.
-            |grep -q "network-proxy (managed)" ~/.bashrc 2>/dev/null || cat >> ~/.bashrc <<'EOF'
-            |# >>> network-proxy (managed) >>>
-            |export HTTP_PROXY="http://127.0.0.1:${port}"
-            |export HTTPS_PROXY="http://127.0.0.1:${port}"
-            |export NO_PROXY="localhost,127.0.0.1"
-            |# <<< network-proxy (managed) <<<
-            |EOF
+            |# Inserted ABOVE the PS1 early-exit guard ('[ -z ... ] && return')
+            |# (present in default bashrc files) so the vars also apply to
+            |# non-interactive shells that explicitly 'source ~/.bashrc'
+            |# (e.g. tool/CI invocations, which never see lines below it).
+            |# The marker check keeps repeat runs from appending duplicates.
+            |python3 - "${port}" ~/.bashrc <<'PYEOF'
+            |import sys
+            |port, rc = sys.argv[1], sys.argv[2]
+            |begin = "# >>> network-proxy (managed) >>>"
+            |try:
+            |    text = open(rc).read()
+            |except FileNotFoundError:
+            |    text = ""
+            |if begin in text:
+            |    print("bashrc: managed block already present (idempotent skip)")
+            |else:
+            |    block = "\n".join([
+            |        begin,
+            |        'export HTTP_PROXY="http://127.0.0.1:' + port + '"',
+            |        'export HTTPS_PROXY="http://127.0.0.1:' + port + '"',
+            |        'export NO_PROXY="localhost,127.0.0.1"',
+            |        "# <<< network-proxy (managed) <<<",
+            |    ]) + "\n"
+            |    guard = '[ -z "${"$"}PS1" ] && return'
+            |    if guard in text:
+            |        text = text.replace(guard, block + guard, 1)
+            |        where = "above PS1 guard"
+            |    else:
+            |        text = text.rstrip("\n") + "\n" + block
+            |        where = "appended"
+            |    open(rc, "w").write(text)
+            |    print("bashrc: managed block " + where)
+            |PYEOF
             |# Tell opencode to absorb 429s itself (proxy also retries).
             |# Converges: re-running rewrites the same values, no duplication.
             |python3 -c "
