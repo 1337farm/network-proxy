@@ -59,9 +59,9 @@ class ProviderStore private constructor() {
 
     data class Provider(
         val id: String,
-        val baseUrl: String,
-        val authHeader: String = "x-api-key",
-        val authScheme: String = "",
+        var baseUrl: String,
+        var authHeader: String = "x-api-key",
+        var authScheme: String = "",
         val keys: MutableList<ApiKey> = mutableListOf(),
         var cursor: Int = 0
     ) {
@@ -150,6 +150,49 @@ class ProviderStore private constructor() {
     companion object {
         fun blank() = ProviderStore()
 
+        /**
+         * Well-known provider defaults (no secrets — user adds keys).
+         * Single source of truth: [ensureWellKnown] merges these into any
+         * loaded store, so fresh installs AND upgrades converge without a
+         * manual "Seed" step.
+         */
+        fun wellKnown(): List<Provider> = listOf(
+            Provider("opencode-zen", "https://opencode.ai/zen/v1", "Authorization", "Bearer "),
+            Provider("nvidia", "https://integrate.api.nvidia.com/v1", "Authorization", "Bearer "),
+            Provider("google", "https://generativelanguage.googleapis.com/v1beta", "x-goog-api-key"),
+            Provider("z-ai", "https://open.bigmodel.cn/api/paas/v4", "Authorization", "Bearer "),
+        )
+
+        /**
+         * Merge well-known providers into [store]: add missing ones, refresh
+         * baseUrl/auth wiring on existing ones (never touches keys/cursor),
+         * drop legacy ids no longer well-known ONLY when they hold no keys
+         * (user data is never deleted). Returns the count added.
+         */
+        fun ensureWellKnown(store: ProviderStore): Int {
+            var added = 0
+            for (wk in wellKnown()) {
+                val cur = store.providers[wk.id]
+                if (cur == null) {
+                    store.providers[wk.id] = wk
+                    added++
+                } else {
+                    // Refresh wiring (e.g. endpoint moved) — keys stay put.
+                    cur.baseUrl = wk.baseUrl
+                    cur.authHeader = wk.authHeader
+                    cur.authScheme = wk.authScheme
+                }
+            }
+            val known = wellKnown().map { it.id }.toSet()
+            for (id in store.providers.keys.toList()) {
+                val p = store.providers[id]!!
+                if (id !in known && p.keys.isEmpty()) {
+                    store.providers.remove(id)
+                }
+            }
+            return added
+        }
+
         fun fromJson(json: String): ProviderStore {
             val store = ProviderStore()
             val o = JSONObject(json)
@@ -171,24 +214,23 @@ class ProviderStore private constructor() {
                     store.routes[r.modelId] = r
                 }
             }
+            ensureWellKnown(store)
             return store
         }
 
         fun loadOrBlank(context: Context): ProviderStore {
-            val json = CredentialVault.load(context) ?: return blank()
+            val json = CredentialVault.load(context)
+            if (json == null) {
+                // Fresh install: start with providers present, keys empty.
+                val store = blank()
+                ensureWellKnown(store)
+                return store
+            }
             return try { fromJson(json) } catch (e: Exception) {
                 ProxyMetrics.eventError("ProviderStore: corrupt vault JSON, starting blank", e)
-                blank()
+                blank().also { ensureWellKnown(it) }
             }
         }
-
-        /** Well-known provider defaults (no secrets — user adds keys). */
-        fun wellKnown(): List<Provider> = listOf(
-            Provider("opencode-zen", "https://opencode.ai/zen/v1", "Authorization", "Bearer "),
-            Provider("nvidia", "https://integrate.api.nvidia.com/v1", "Authorization", "Bearer "),
-            Provider("google", "https://generativelanguage.googleapis.com/v1beta", "x-goog-api-key"),
-            Provider("z-ai", "https://open.bigmodel.cn/api/paas/v4", "Authorization", "Bearer "),
-        )
 
         /**
          * Longest baseUrl-prefix match for [targetUrl]. Path-aware so
