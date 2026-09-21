@@ -6,14 +6,12 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:fitsSystemWindows="true"
-    android:paddingBottom="?attr/actionBarSize"
     tools:context=".MainActivity">
 
     <androidx.core.widget.NestedScrollView
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:fillViewport="true"
-        android:paddingBottom="?attr/actionBarSize"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintStart_toStartOf="parent"
@@ -29,14 +27,16 @@
                 android:id="@+id/statusCard"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="16dp"
-                app:cardCornerRadius="12dp">
+                android:layout_marginBottom="12dp"
+                app:cardCornerRadius="16dp"
+                app:strokeWidth="1dp"
+                app:strokeColor="@color/purple_500">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
-                    android:padding="16dp">
+                    android:padding="12dp">
 
                     <TextView
                         android:id="@+id/statusText"
@@ -53,9 +53,11 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:text=""
-                        android:textSize="14sp"
+                        android:textSize="13sp"
                         android:gravity="center"
-                        android:layout_marginTop="4dp"/>
+                        android:layout_marginTop="4dp"
+                        android:textColor="@color/purple_200"
+                        android:visibility="gone"/>
 
                     <TextView
                         android:id="@+id/upstreamText"
@@ -64,7 +66,8 @@
                         android:text=""
                         android:textSize="12sp"
                         android:gravity="center"
-                        android:layout_marginTop="4dp"/>
+                        android:layout_marginTop="2dp"
+                        android:visibility="gone"/>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
@@ -72,8 +75,8 @@
                 android:id="@+id/statsCard"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="16dp"
-                app:cardCornerRadius="12dp">
+                android:layout_marginBottom="12dp"
+                app:cardCornerRadius="16dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -86,7 +89,8 @@
                         android:layout_height="wrap_content"
                         android:text="Statistics"
                         android:textSize="16sp"
-                        android:textStyle="bold"/>
+                        android:textStyle="bold"
+                        android:textColor="@color/purple_200"/>
 
                     <TextView
                         android:id="@+id/requestsText"
@@ -119,8 +123,8 @@
                 android:id="@+id/configCard"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="16dp"
-                app:cardCornerRadius="12dp">
+                android:layout_marginBottom="12dp"
+                app:cardCornerRadius="16dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -133,7 +137,8 @@
                         android:layout_height="wrap_content"
                         android:text="Configuration"
                         android:textSize="16sp"
-                        android:textStyle="bold"/>
+                        android:textStyle="bold"
+                        android:textColor="@color/purple_200"/>
 
                     <com.google.android.material.textfield.TextInputLayout
                         android:layout_width="match_parent"
@@ -165,7 +170,7 @@
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
                 android:gravity="center"
-                android:layout_marginTop="8dp">
+                android:layout_marginTop="4dp">
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/startStopButton"
@@ -197,8 +202,8 @@
                 android:id="@+id/setupScriptCard"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                app:cardCornerRadius="12dp">
+                android:layout_marginTop="12dp"
+                app:cardCornerRadius="16dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -221,7 +226,8 @@
                             android:layout_weight="1"
                             android:text="@string/setup_script_title"
                             android:textSize="16sp"
-                            android:textStyle="bold"/>
+                            android:textStyle="bold"
+                            android:textColor="@color/purple_200"/>
 
                         <ImageView
                             android:id="@+id/setupScriptExpandIcon"
@@ -245,7 +251,6 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
                         android:text="@string/copy_setup_script"
-                        style="@style/Widget.Material3.Button.TonalButton"
                         app:icon="@android:drawable/ic_menu_save"/>
 
                     <ScrollView
@@ -279,8 +284,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
-                android:layout_marginBottom="100dp"
-                app:cardCornerRadius="12dp">
+                android:layout_marginBottom="24dp"
+                app:cardCornerRadius="16dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -303,7 +308,8 @@
                             android:layout_weight="1"
                             android:text="@string/cleanup_script_title"
                             android:textSize="16sp"
-                            android:textStyle="bold"/>
+                            android:textStyle="bold"
+                            android:textColor="@color/purple_200"/>
 
                         <ImageView
                             android:id="@+id/cleanupScriptExpandIcon"
@@ -327,7 +333,6 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
                         android:text="@string/copy_cleanup_script"
-                        style="@style/Widget.Material3.Button.TonalButton"
                         app:icon="@android:drawable/ic_menu_save"/>
 
                     <ScrollView

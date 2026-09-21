@@ -193,16 +193,25 @@ class MainActivity : AppCompatActivity() {
             statusText.text = error
             statusText.setTextColor(android.graphics.Color.YELLOW)
             portText.text = "Port ${portInput.text} — tap Start to retry"
+            portText.visibility = View.VISIBLE
+            upstreamText.visibility = View.GONE
         } else if (isRunning) {
             startStopButton.text = getString(R.string.stop_proxy)
             startStopButton.icon = getDrawable(android.R.drawable.ic_media_pause)
             statusText.text = getString(R.string.status_running)
             statusText.setTextColor(android.graphics.Color.GREEN)
+            val lan = SetupScript.lanIp(this)
+            portText.text = if (lan.isNotBlank()) "127.0.0.1:${portInput.text} • LAN $lan:${portInput.text}"
+                else "127.0.0.1:${portInput.text}"
+            portText.visibility = View.VISIBLE
+            upstreamText.visibility = View.GONE
         } else {
             startStopButton.text = getString(R.string.start_proxy)
             startStopButton.icon = getDrawable(android.R.drawable.ic_media_play)
             statusText.text = getString(R.string.status_stopped)
             statusText.setTextColor(android.graphics.Color.RED)
+            portText.visibility = View.GONE
+            upstreamText.visibility = View.GONE
         }
     }
 }
