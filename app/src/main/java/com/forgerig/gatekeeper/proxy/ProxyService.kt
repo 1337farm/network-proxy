@@ -47,7 +47,7 @@ class ProxyService : Service() {
     @Volatile private var lastError: String? = null
     private var port = 8080
     private var metricsEnabled = true
-    private var mitmEnabled = false
+    private var mitmEnabled = true
     private var client: OkHttpClient? = null
     private var serverThread: Thread? = null
     private var pool = Executors.newFixedThreadPool(POOL_SIZE)
@@ -93,7 +93,7 @@ class ProxyService : Service() {
         }
         port = intent?.getIntExtra("port", 8080) ?: 8080
         metricsEnabled = intent?.getBooleanExtra("metricsEnabled", true) ?: true
-        mitmEnabled = intent?.getBooleanExtra("mitmEnabled", false) ?: false
+        mitmEnabled = intent?.getBooleanExtra("mitmEnabled", true) ?: true
 
         if (running.get() == 1) {
             ProxyMetrics.event("Restart requested on :$port — draining old listener")
@@ -502,7 +502,8 @@ class ProxyService : Service() {
             upstream.setSoTimeout(120_000)
             clientOut.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
             clientOut.flush()
-            if (metricsEnabled) ProxyMetrics.recordRequestEnd(sessionId, requestId, 200, 0, NetworkScenario.SUCCESS)
+            // No recordRequestEnd here: the tunnel record is finalized at
+            // close with lifetime bytes (see recordTunnelEnd below).
             requestCount.incrementAndGet()
             ProxyMetrics.event("CONNECT $host:$port (tunnel established)")
             val upIn = upstream.getInputStream()
@@ -517,6 +518,9 @@ class ProxyService : Service() {
             // NOTE: bytesOut is fed per-chunk inside relay()/relayTap();
             // adding the lump sum here would double-count tunneled bytes.
             ProxyMetrics.addBytes(host, upBytes.get(), downBytes.get())
+            if (metricsEnabled) ProxyMetrics.recordTunnelEnd(
+                requestId, upBytes.get() + downBytes.get(), NetworkScenario.SUCCESS
+            )
             val ms = System.currentTimeMillis() - startedAt
             ProxyMetrics.event(
                 "TUNNEL $host closed up=${humanBytesShort(upBytes.get())} " +
@@ -572,7 +576,6 @@ class ProxyService : Service() {
                 endpointIdentificationAlgorithm = "HTTPS"
             }
             tlsUp.startHandshake()
-            if (metricsEnabled) ProxyMetrics.recordRequestEnd(sessionId, requestId, 200, 0, NetworkScenario.SUCCESS)
             requestCount.incrementAndGet()
             ProxyMetrics.event("MITM split $host:$port (plaintext visible)")
             val cIn = tlsClient.inputStream
@@ -590,6 +593,9 @@ class ProxyService : Service() {
             // NOTE: bytesOut is fed per-chunk inside relay()/relayTap();
             // adding the lump sum here would double-count tunneled bytes.
             ProxyMetrics.addBytes(host, upBytes.get(), downBytes.get())
+            if (metricsEnabled) ProxyMetrics.recordTunnelEnd(
+                requestId, upBytes.get() + downBytes.get(), NetworkScenario.SUCCESS
+            )
             if (tap.size() > 0) {
                 val found = ProxyMetrics.scanUsage(tap.toString("UTF-8"))
                 if (found[0] + found[1] + found[2] + found[3] > 0) {

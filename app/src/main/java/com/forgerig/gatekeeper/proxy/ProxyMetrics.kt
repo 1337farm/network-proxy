@@ -136,7 +136,8 @@ data class RequestMetrics(
     val durationMs: Long,
     val bytesTransferred: Long,
     val statusCode: Int,
-    val scenario: String
+    val scenario: String,
+    val category: String = "unknown"
 ) {
     fun toJson(): JSONObject {
         val json = JSONObject()
@@ -148,6 +149,7 @@ data class RequestMetrics(
         json.put("bytesTransferred", bytesTransferred)
         json.put("statusCode", statusCode)
         json.put("scenario", scenario)
+        json.put("category", category)
         return json
     }
 
@@ -161,7 +163,8 @@ data class RequestMetrics(
                 durationMs = obj.getLong("durationMs"),
                 bytesTransferred = obj.getLong("bytesTransferred"),
                 statusCode = obj.getInt("statusCode"),
-                scenario = obj.getString("scenario")
+                scenario = obj.getString("scenario"),
+                category = obj.optString("category", "unknown")
             )
         }
     }
@@ -216,8 +219,36 @@ object ProxyMetrics {
             durationMs = 0,
             bytesTransferred = 0,
             statusCode = 0,
-            scenario = NetworkScenario.UNKNOWN.name
+            scenario = NetworkScenario.UNKNOWN.name,
+            category = categorizeUrl(url)
         )
+    }
+
+    private fun categorizeUrl(url: String): String {
+        val lowerUrl = url.lowercase()
+        // File downloads: large payloads, binaries, archives, media
+        val filePatterns = listOf(
+            ".apk", ".exe", ".dmg", ".deb", ".rpm", ".zip", ".tar", ".gz",
+            ".bz2", ".xz", ".7z", ".rar", ".iso", ".img", ".bin",
+            ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp",
+            ".mp3", ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv",
+            ".wav", ".ogg", ".flac", ".aac",
+            ".css", ".js", ".ts", ".jsx", ".tsx", ".html", ".htm",
+            ".json", ".xml", ".yaml", ".yml", ".txt", ".md", ".csv",
+            ".wasm", ".map", ".woff", ".woff2", ".ttf", ".eot", ".svg",
+            "github.com", "download", "asset", "release", "artifact"
+        )
+        // API endpoints: service APIs, AI models, auth, config
+        val apiPatterns = listOf(
+            "api.", "/api/", "integrate.", "models.", "opencode.ai",
+            "graphql", "oauth", "auth", "token", "key", "v1/", "v2/", "v3/",
+            "anthropic", "openai", "googleapis", "cloudflare", "fastly",
+            "search", "parallel", "vector", "embedding", "completion"
+        )
+        if (filePatterns.any { lowerUrl.contains(it) }) return "file"
+        if (apiPatterns.any { lowerUrl.contains(it) }) return "api"
+        return "other"
     }
 
     fun recordRequestEnd(sessionId: String, requestId: String, statusCode: Int, bytesTransferred: Long, scenario: NetworkScenario) {
@@ -230,7 +261,8 @@ object ProxyMetrics {
             durationMs = System.currentTimeMillis() - start,
             bytesTransferred = bytesTransferred,
             statusCode = statusCode,
-            scenario = scenario.name
+            scenario = scenario.name,
+            category = requestMetrics[requestId]?.category ?: categorizeUrl(requestMetrics[requestId]?.url ?: "")
         )
         requestMetrics[requestId] = metrics
         incrementScenario(scenario)
@@ -244,6 +276,29 @@ object ProxyMetrics {
                 scenarios = it.scenarios + scenario.name
             )
         }
+    }
+
+    /**
+     * Finalize a CONNECT tunnel record when the tunnel actually closes.
+     * Tunnels can't use recordRequestEnd at handshake time (bytes=0,
+     * handshake-only duration) — that produced exports full of 0-byte
+     * 200s. This rewrites the record with lifetime bytes + duration.
+     */
+    fun recordTunnelEnd(requestId: String, bytesTransferred: Long, scenario: NetworkScenario) {
+        val start = requestStartTimes.remove(requestId) ?: System.currentTimeMillis()
+        val prev = requestMetrics[requestId]
+        requestMetrics[requestId] = RequestMetrics(
+            requestId = requestId,
+            sessionId = prev?.sessionId ?: "",
+            url = prev?.url ?: "",
+            method = prev?.method ?: "CONNECT",
+            durationMs = System.currentTimeMillis() - start,
+            bytesTransferred = bytesTransferred,
+            statusCode = if (prev?.statusCode == 0) 200 else prev?.statusCode ?: 200,
+            scenario = scenario.name,
+            category = prev?.category ?: categorizeUrl(prev?.url ?: "")
+        )
+        incrementScenario(scenario)
     }
 
     fun incrementScenario(scenario: NetworkScenario) {
