@@ -516,8 +516,9 @@ class ProxyService : Service() {
             val t2 = Thread { relay(upIn, clientOut, downBytes) }
             t1.start(); t2.start()
             t1.join(); t2.join()
+            // NOTE: bytesOut is fed per-chunk inside relay()/relayTap();
+            // adding the lump sum here would double-count tunneled bytes.
             ProxyMetrics.addBytes(host, upBytes.get(), downBytes.get())
-            bytesOut.addAndGet(upBytes.get() + downBytes.get())
             val ms = System.currentTimeMillis() - startedAt
             ProxyMetrics.event(
                 "TUNNEL $host closed up=${humanBytesShort(upBytes.get())} " +
@@ -588,8 +589,9 @@ class ProxyService : Service() {
             val t2 = Thread { relayTap(uIn, cOut, downBytes, tap, tapCap) }
             t1.start(); t2.start()
             t1.join(); t2.join()
+            // NOTE: bytesOut is fed per-chunk inside relay()/relayTap();
+            // adding the lump sum here would double-count tunneled bytes.
             ProxyMetrics.addBytes(host, upBytes.get(), downBytes.get())
-            bytesOut.addAndGet(upBytes.get() + downBytes.get())
             if (tap.size() > 0) {
                 val found = ProxyMetrics.scanUsage(tap.toString("UTF-8"))
                 if (found[0] + found[1] + found[2] + found[3] > 0) {
