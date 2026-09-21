@@ -56,10 +56,11 @@ class ProxyViewModel : ViewModel() {
         this.context?.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
     }
 
-    fun startProxy(port: Int, metricsEnabled: Boolean) {
+    fun startProxy(port: Int, metricsEnabled: Boolean, mitmEnabled: Boolean = false) {
         val intent = Intent(context, ProxyService::class.java).apply {
             putExtra("port", port)
             putExtra("metricsEnabled", metricsEnabled)
+            putExtra("mitmEnabled", mitmEnabled)
         }
         context?.let {
             ContextCompat.startForegroundService(it, intent)
@@ -95,6 +96,7 @@ class ProxyViewModel : ViewModel() {
 
     fun clearMetrics() {
         ProxyMetrics.clear()
+        ProxyMetrics.resetTallies()
         // Requests/Transferred live in the bound service counters, not in
         // ProxyMetrics — without this, Clear only ever zeroed Retries.
         proxyService.value?.resetStats()
