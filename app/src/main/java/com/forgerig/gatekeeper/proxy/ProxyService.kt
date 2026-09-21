@@ -312,7 +312,8 @@ class ProxyService : Service() {
                         (preCode == 401 || preCode == 403 || preCode == 429 || preCode in 500..599) &&
                         keyRounds + 1 < maxKeyRounds
                     ) {
-                        store.report(provider!!.id, kc.second.id, preCode)
+                        val retryAfterSecs = resp.headers["Retry-After"]?.toLongOrNull()
+                        store.report(provider!!.id, kc.second.id, preCode, retryAfterSecs)
                         keyRounds++
                         val next = nextUsableKey(
                             store, provider, kc.second.id, routeLeg,
@@ -335,7 +336,10 @@ class ProxyService : Service() {
                     }
                     resp.use { r ->
                         val scenario = ScenarioClassifier.classifyResponse(r.code)
-                        keyCtx?.let { (p, k) -> store.report(p.id, k.id, r.code) }
+                        keyCtx?.let { (p, k) ->
+                            val ra = r.headers["Retry-After"]?.toLongOrNull()
+                            store.report(p.id, k.id, r.code, ra)
+                        }
                         val action = ScenarioClassifier.toRetryAction(scenario)
                         if (action == RetryAction.RETRY_WITH_BACKOFF && policy.shouldRetry(attempt)) {
                             val retryAfter = r.headers["Retry-After"]?.toLongOrNull()

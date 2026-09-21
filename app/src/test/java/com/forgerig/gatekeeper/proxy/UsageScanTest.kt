@@ -38,6 +38,38 @@ class UsageScanTest {
     }
 
     @Test
+    fun zenRollover429EscalatesAndHonorsRetryAfter() {
+        val store = ProviderStore.blank()
+        val z = ProviderStore.Provider(
+            "opencode-zen", "https://opencode.ai/zen/v1", "Authorization", "Bearer ",
+            mutableListOf(
+                ProviderStore.ApiKey("k1", "a", "s1"),
+                ProviderStore.ApiKey("k2", "b", "s2")
+            )
+        )
+        z.keys[0].id.let { }
+        store.providers[z.id] = z
+        store.coolDownMs = 60_000
+        // First 429 cools base.
+        store.report("opencode-zen", "k1", 429)
+        val first = z.keys.find { it.id == "k1" }!!.cooledUntilMs
+        assert(first > System.currentTimeMillis()) { "first 429 should cool" }
+        // Second consecutive 429 escalates (streak 2).
+        store.report("opencode-zen", "k1", 429)
+        val second = z.keys.find { it.id == "k1" }!!.cooledUntilMs
+        assert(second > first) { "escalated cooldown should exceed base" }
+        // Retry-After wins when bigger: 600s.
+        store.report("opencode-zen", "k2", 429, 600)
+        val rt = z.keys.find { it.id == "k2" }!!.cooledUntilMs - System.currentTimeMillis()
+        assert(rt >= 599_000) { "Retry-After 600s should dominate, got ${rt}ms" }
+        // Active key rolls away from cooled key toward k2... both cooled now,
+        // so usable is empty; free k2 manually and check streak reset on 200.
+        z.keys.find { it.id == "k2" }!!.cooledUntilMs = 0
+        store.report("opencode-zen", "k2", 200)
+        assertEquals(0, z.keys.find { it.id == "k2" }!!.streak429)
+    }
+
+    @Test
     fun eventBufferCapsAndFormats() {
         ProxyMetrics.logSink = { _, _, _ -> }
         ProxyMetrics.clearEvents()
