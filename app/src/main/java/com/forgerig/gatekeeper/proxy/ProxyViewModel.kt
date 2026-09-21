@@ -56,7 +56,7 @@ class ProxyViewModel : ViewModel() {
         this.context?.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
     }
 
-    fun startProxy(port: Int, metricsEnabled: Boolean, mitmEnabled: Boolean = true) {
+    fun startProxy(port: Int, metricsEnabled: Boolean, mitmEnabled: Boolean = false) {
         val intent = Intent(context, ProxyService::class.java).apply {
             putExtra("port", port)
             putExtra("metricsEnabled", metricsEnabled)

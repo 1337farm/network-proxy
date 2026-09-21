@@ -95,17 +95,30 @@ object SetupScript {
 |# Sanity probe: fail fast here if the app proxy isn't listening.
              |# Read-only: safe to run any number of times.
              |python3 -c "import socket,sys; s=socket.create_connection(('127.0.0.1',${port}), timeout=5); s.close(); print('proxy probe: listening on 127.0.0.1:${port}')"
-             |# --- MITM CA trust (always on) ---
-             |# Takes the CA embedded in the app and trusts it for
-             |# this terminal: Ubuntu store (best effort), Termux/Python/Node
-             |# bundles, plus persistent exports. Skips cleanly when absent.
+             |# --- MITM CA trust (only matters when Decrypt-HTTPS is ON) ---
+             |# Fetches the CA straight from the running proxy — no manual
+             |# Export step: `curl http://127.0.0.1:${port}/ca.pem` (works
+             |# with or without proxy env, direct-to-port included). Falls
+             |# back to a previously exported file when the proxy isn't up.
+             |# Trusted for this terminal: Ubuntu store (best effort),
+             |# Termux/Python/Node bundles, plus persistent exports.
+             |# Skips cleanly when absent (Decrypt OFF = opaque tunnels,
+             |# nothing breaks).
              |CA_PEM=""
-             |for c in /sdcard/Download/network-proxy-ca.pem "${"$"}HOME/Download/network-proxy-ca.pem" "${"$"}HOME/.config/network-proxy/ca.pem"; do
-             |  if [[ -f "${"$"}c" ]]; then CA_PEM="${"$"}c"; break; fi
-             |done
-             |if [[ -n "${"$"}CA_PEM" ]]; then
-             |  mkdir -p "${"$"}HOME/.config/network-proxy"
-             |  cp "${"$"}CA_PEM" "${"$"}HOME/.config/network-proxy/ca.pem"
+             |CA_TMP="${"$"}HOME/.config/network-proxy/ca.pem"
+             |mkdir -p "${"$"}HOME/.config/network-proxy"
+             |if command -v curl >/dev/null 2>&1; then
+             |  curl -sS -m 10 --noproxy '*' "http://127.0.0.1:${port}/ca.pem" -o "${"$"}CA_TMP.tmp" 2>/dev/null && \\
+             |    grep -q "BEGIN CERTIFICATE" "${"$"}CA_TMP.tmp" 2>/dev/null && mv "${"$"}CA_TMP.tmp" "${"$"}CA_TMP" && echo "MITM CA fetched from proxy (:${port}/ca.pem)"
+             |  rm -f "${"$"}CA_TMP.tmp" 2>/dev/null || true
+             |fi
+             |if [[ ! -s "${"$"}CA_TMP" ]]; then
+             |  for c in /sdcard/Download/network-proxy-ca.pem "${"$"}HOME/Download/network-proxy-ca.pem"; do
+             |    if [[ -f "${"$"}c" ]]; then cp "${"$"}c" "${"$"}CA_TMP"; echo "MITM CA taken from ${"$"}c (proxy fetch skipped)"; break; fi
+             |  done
+             |fi
+             |if [[ -s "${"$"}CA_TMP" ]]; then
+             |  CA_PEM="${"$"}CA_TMP"
              |  SYS_BUNDLE=""; for b in /etc/ssl/certs/ca-certificates.crt "${"$"}PREFIX/etc/tls/cert.pem"; do
              |    if [[ -f "${"$"}b" ]]; then SYS_BUNDLE="${"$"}b"; break; fi
              |  done

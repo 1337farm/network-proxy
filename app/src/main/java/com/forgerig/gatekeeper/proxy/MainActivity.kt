@@ -51,6 +51,7 @@ class MainActivity : AppCompatActivity() {
         var cleanupScriptExpanded = false
         val portInput = findViewById<TextInputEditText>(R.id.portInput)
         val metricsCheck = findViewById<MaterialCheckBox>(R.id.metricsCheck)
+        val mitmCheck = findViewById<MaterialCheckBox>(R.id.mitmCheck)
 
         val refreshScript = {
             val p = portInput.text.toString().toIntOrNull() ?: 3128
@@ -98,11 +99,19 @@ class MainActivity : AppCompatActivity() {
         startStopButton.setOnClickListener {
             val port = portInput.text.toString().toIntOrNull() ?: 8080
             val metricsEnabled = metricsCheck.isChecked
+            val mitmEnabled = mitmCheck.isChecked
 
             if (viewModel.isRunning.value == true) {
                 viewModel.stopProxy()
             } else {
-                viewModel.startProxy(port, metricsEnabled, mitmEnabled = true)
+                if (mitmEnabled && MitmCa.caPem(this) == null) {
+                    Toast.makeText(
+                        this,
+                        "MITM CA unavailable — starting opaque (install CA via Export below)",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+                viewModel.startProxy(port, metricsEnabled, mitmEnabled)
             }
             refreshScript()
         }
@@ -165,6 +174,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<MaterialButton>(R.id.addKeyButton)?.setOnClickListener { showAddKeyDialog() }
         findViewById<MaterialButton>(R.id.exportBackupButton)?.setOnClickListener { showExportBackupDialog() }
         findViewById<MaterialButton>(R.id.importBackupButton)?.setOnClickListener { showImportBackupDialog() }
+        findViewById<MaterialButton>(R.id.exportCaButton)?.setOnClickListener { shareMitmCa() }
     }
 
     private fun refreshProvidersSummary() {
@@ -285,6 +295,30 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    /** Share the MITM CA cert so the setup script can trust it. */
+    private fun shareMitmCa() {
+        val pem = MitmCa.caPem(this)
+        if (pem == null) {
+            Toast.makeText(this, "CA unavailable", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            val file = java.io.File(cacheDir, "network-proxy-ca.pem")
+            file.writeText(pem)
+            val uri = FileProvider.getUriForFile(
+                this, "${applicationContext.packageName}.fileprovider", file
+            )
+            val share = Intent(Intent.ACTION_SEND).apply {
+                type = "application/x-pem-file"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(share, "Share MITM CA (install in terminal)"))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Share failed: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     override fun onResume() {
