@@ -28,9 +28,10 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="12dp"
-                app:cardCornerRadius="16dp"
+                app:cardCornerRadius="20dp"
                 app:strokeWidth="1dp"
-                app:strokeColor="@color/purple_500">
+                app:strokeColor="@color/outline"
+                app:cardBackgroundColor="@color/surface">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -38,15 +39,29 @@
                     android:orientation="vertical"
                     android:padding="12dp">
 
-                    <TextView
-                        android:id="@+id/statusText"
+                    <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="@string/proxy_stopped"
-                        android:textSize="18sp"
-                        android:textStyle="bold"
-                        android:gravity="center"
-                        android:textColor="@color/red"/>
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <View
+                            android:id="@+id/statusDot"
+                            android:layout_width="10dp"
+                            android:layout_height="10dp"
+                            android:layout_marginEnd="10dp"
+                            android:background="@drawable/status_dot" />
+
+                        <TextView
+                            android:id="@+id/statusText"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/proxy_stopped"
+                            android:textSize="19sp"
+                            android:textStyle="bold"
+                            android:textColor="@color/red" />
+                    </LinearLayout>
 
                     <TextView
                         android:id="@+id/portText"
@@ -75,6 +90,7 @@
                 android:id="@+id/statsCard"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                app:cardBackgroundColor="@color/surface"
                 android:layout_marginBottom="12dp"
                 app:cardCornerRadius="16dp">
 
@@ -90,7 +106,7 @@
                         android:text="Statistics"
                         android:textSize="16sp"
                         android:textStyle="bold"
-                        android:textColor="@color/purple_200"/>
+                        style="@style/Text.SectionTitle"/>
 
                     <TextView
                         android:id="@+id/requestsText"
@@ -123,6 +139,7 @@
                 android:id="@+id/configCard"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                app:cardBackgroundColor="@color/surface"
                 android:layout_marginBottom="12dp"
                 app:cardCornerRadius="16dp">
 
@@ -138,7 +155,7 @@
                         android:text="Configuration"
                         android:textSize="16sp"
                         android:textStyle="bold"
-                        android:textColor="@color/purple_200"/>
+                        style="@style/Text.SectionTitle"/>
 
                     <com.google.android.material.textfield.TextInputLayout
                         android:layout_width="match_parent"
@@ -202,6 +219,7 @@
                 android:id="@+id/setupScriptCard"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                app:cardBackgroundColor="@color/surface"
                 android:layout_marginTop="12dp"
                 app:cardCornerRadius="16dp">
 
@@ -227,7 +245,7 @@
                             android:text="@string/setup_script_title"
                             android:textSize="16sp"
                             android:textStyle="bold"
-                            android:textColor="@color/purple_200"/>
+                            style="@style/Text.SectionTitle"/>
 
                         <ImageView
                             android:id="@+id/setupScriptExpandIcon"
@@ -242,7 +260,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:text="@string/setup_script_hint"
-                        android:textSize="12sp"
+                        style="@style/Text.Hint"
                         android:layout_marginTop="4dp"/>
 
                     <com.google.android.material.button.MaterialButton
@@ -251,7 +269,9 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
                         android:text="@string/copy_setup_script"
-                        app:icon="@android:drawable/ic_menu_save"/>
+                        app:icon="@android:drawable/ic_menu_save"
+                        app:strokeWidth="1dp"
+                        app:strokeColor="@color/outline"/>
 
                     <ScrollView
                         android:id="@+id/setupScriptScrollView"
@@ -259,7 +279,7 @@
                         android:layout_height="wrap_content"
                         android:maxHeight="280dp"
                         android:layout_marginTop="8dp"
-                        android:background="#11000000"
+                        android:background="@drawable/script_block_bg"
                         android:visibility="gone">
 
                         <HorizontalScrollView
@@ -270,9 +290,8 @@
                                 android:id="@+id/setupScriptText"
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
-                                android:padding="8dp"
-                                android:textSize="11sp"
-                                android:fontFamily="monospace"
+                                android:padding="10dp"
+                                style="@style/Text.ScriptBlock"
                                 android:textIsSelectable="true"/>
                         </HorizontalScrollView>
                     </ScrollView>
@@ -283,6 +302,7 @@
                 android:id="@+id/cleanupScriptCard"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                app:cardBackgroundColor="@color/surface"
                 android:layout_marginTop="12dp"
                 android:layout_marginBottom="24dp"
                 app:cardCornerRadius="16dp">
@@ -309,7 +329,7 @@
                             android:text="@string/cleanup_script_title"
                             android:textSize="16sp"
                             android:textStyle="bold"
-                            android:textColor="@color/purple_200"/>
+                            style="@style/Text.SectionTitle"/>
 
                         <ImageView
                             android:id="@+id/cleanupScriptExpandIcon"
@@ -324,7 +344,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:text="@string/cleanup_script_hint"
-                        android:textSize="12sp"
+                        style="@style/Text.Hint"
                         android:layout_marginTop="4dp"/>
 
                     <com.google.android.material.button.MaterialButton
@@ -333,7 +353,9 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
                         android:text="@string/copy_cleanup_script"
-                        app:icon="@android:drawable/ic_menu_save"/>
+                        app:icon="@android:drawable/ic_menu_save"
+                        app:strokeWidth="1dp"
+                        app:strokeColor="@color/outline"/>
 
                     <ScrollView
                         android:id="@+id/cleanupScriptScrollView"
@@ -341,7 +363,7 @@
                         android:layout_height="wrap_content"
                         android:maxHeight="280dp"
                         android:layout_marginTop="8dp"
-                        android:background="#11000000"
+                        android:background="@drawable/script_block_bg"
                         android:visibility="gone">
 
                         <HorizontalScrollView

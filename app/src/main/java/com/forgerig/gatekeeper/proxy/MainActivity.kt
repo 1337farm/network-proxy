@@ -183,15 +183,24 @@ class MainActivity : AppCompatActivity() {
     private fun updateUI(isRunning: Boolean, error: String? = null) {
         val startStopButton = findViewById<MaterialButton>(R.id.startStopButton)
         val statusText = findViewById<TextView>(R.id.statusText)
+        val statusDot = findViewById<View>(R.id.statusDot)
         val portText = findViewById<TextView>(R.id.portText)
         val upstreamText = findViewById<TextView>(R.id.upstreamText)
         val portInput = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.portInput)
+
+        // Status hues come from the theme system (desaturated emerald /
+        // soft red / amber) so Running / Stopped / warning sit with the
+        // violet chrome instead of clashing neon.
+        val running = getColor(R.color.status_running)
+        val stopped = getColor(R.color.status_stopped)
+        val warning = getColor(R.color.status_warning)
 
         if (!error.isNullOrBlank()) {
             startStopButton.text = getString(R.string.start_proxy)
             startStopButton.icon = getDrawable(android.R.drawable.ic_media_play)
             statusText.text = error
-            statusText.setTextColor(android.graphics.Color.YELLOW)
+            statusText.setTextColor(warning)
+            statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(warning)
             portText.text = "Port ${portInput.text} — tap Start to retry"
             portText.visibility = View.VISIBLE
             upstreamText.visibility = View.GONE
@@ -199,7 +208,8 @@ class MainActivity : AppCompatActivity() {
             startStopButton.text = getString(R.string.stop_proxy)
             startStopButton.icon = getDrawable(android.R.drawable.ic_media_pause)
             statusText.text = getString(R.string.status_running)
-            statusText.setTextColor(android.graphics.Color.GREEN)
+            statusText.setTextColor(running)
+            statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(running)
             val lan = SetupScript.lanIp(this)
             portText.text = if (lan.isNotBlank()) "127.0.0.1:${portInput.text} • LAN $lan:${portInput.text}"
                 else "127.0.0.1:${portInput.text}"
@@ -209,7 +219,8 @@ class MainActivity : AppCompatActivity() {
             startStopButton.text = getString(R.string.start_proxy)
             startStopButton.icon = getDrawable(android.R.drawable.ic_media_play)
             statusText.text = getString(R.string.status_stopped)
-            statusText.setTextColor(android.graphics.Color.RED)
+            statusText.setTextColor(stopped)
+            statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(stopped)
             portText.visibility = View.GONE
             upstreamText.visibility = View.GONE
         }
