@@ -158,19 +158,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         refreshProvidersSummary()
-        findViewById<MaterialButton>(R.id.seedProvidersButton)?.setOnClickListener {
-            val store = ProviderBroker.store(this)
-            var added = 0
-            for (p in ProviderStore.wellKnown()) {
-                if (!store.providers.containsKey(p.id)) {
-                    store.providers[p.id] = p
-                    added++
-                }
-            }
-            ProviderBroker.save(this, store)
-            refreshProvidersSummary()
-            Toast.makeText(this, "Seeded $added providers — add keys next", Toast.LENGTH_SHORT).show()
-        }
         findViewById<MaterialButton>(R.id.addKeyButton)?.setOnClickListener { showAddKeyDialog() }
         findViewById<MaterialButton>(R.id.exportBackupButton)?.setOnClickListener { showExportBackupDialog() }
         findViewById<MaterialButton>(R.id.importBackupButton)?.setOnClickListener { showImportBackupDialog() }
@@ -196,11 +183,9 @@ class MainActivity : AppCompatActivity() {
 
     /** Add-key dialog: provider picker + label + secret → sealed vault. */
     private fun showAddKeyDialog() {
+        // Well-known providers are auto-seeded on store load, so the picker
+        // is never empty — no manual Seed step.
         val store = ProviderBroker.store(this)
-        if (store.providers.isEmpty()) {
-            Toast.makeText(this, "Seed providers first", Toast.LENGTH_SHORT).show()
-            return
-        }
         val ids = store.providers.keys.sorted().toTypedArray()
         val spinner = android.widget.Spinner(this).apply {
             adapter = android.widget.ArrayAdapter(

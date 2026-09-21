@@ -23,8 +23,7 @@
     <string name="copy_cleanup_script">Copy cleanup script</string>
     <string name="mitm_enabled">Decrypt HTTPS for token tally (install CA first)</string>
     <string name="providers_title">Providers &amp; keys</string>
-    <string name="providers_hint">Brokered credentials: proxy injects the active key per provider and rolls over on 429/401. Secrets stay encrypted on-device.</string>
-    <string name="seed_providers">Seed providers</string>
+    <string name="providers_hint">Providers are built in — just add keys. The proxy injects the active key per provider and rolls over on 429/401. Secrets stay encrypted on-device.</string>
     <string name="add_key">Add key</string>
     <string name="export_backup">Export backup</string>
     <string name="import_backup">Import backup</string>
