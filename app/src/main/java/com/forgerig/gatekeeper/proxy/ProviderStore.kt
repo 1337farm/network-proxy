@@ -184,18 +184,10 @@ class ProviderStore private constructor() {
 
         /** Well-known provider defaults (no secrets — user adds keys). */
         fun wellKnown(): List<Provider> = listOf(
-            Provider("anthropic", "https://api.anthropic.com", "x-api-key"),
-            Provider("openai", "https://api.openai.com", "Authorization", "Bearer "),
-            Provider("openrouter", "https://openrouter.ai/api/v1", "Authorization", "Bearer "),
-            Provider("deepseek", "https://api.deepseek.com", "Authorization", "Bearer "),
-            Provider("glm", "https://open.bigmodel.cn/api/paas/v4", "Authorization", "Bearer "),
-            // NVIDIA NIM cloud: OpenAI-compatible, Bearer key from build.nvidia.com.
-            Provider("nvidia", "https://integrate.api.nvidia.com/v1", "Authorization", "Bearer "),
-            // OpenCode Zen gateway. Anthropic-shaped traffic goes to the
-            // /messages endpoint with x-api-key; OpenAI-shaped traffic to
-            // the gateway root with Bearer. Longest-prefix match wins.
-            Provider("opencode-zen-messages", "https://opencode.ai/zen/v1/messages", "x-api-key"),
             Provider("opencode-zen", "https://opencode.ai/zen/v1", "Authorization", "Bearer "),
+            Provider("nvidia", "https://integrate.api.nvidia.com/v1", "Authorization", "Bearer "),
+            Provider("google", "https://generativelanguage.googleapis.com/v1beta", "x-goog-api-key"),
+            Provider("z-ai", "https://open.bigmodel.cn/api/paas/v4", "Authorization", "Bearer "),
         )
 
         /**
