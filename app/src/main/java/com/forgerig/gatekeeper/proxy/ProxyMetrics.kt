@@ -268,10 +268,16 @@ object ProxyMetrics {
         incrementScenario(scenario)
     }
 
-<<<<<<< Updated upstream
     fun recordRetry(sessionId: String, requestId: String, attempt: Int, scenario: NetworkScenario, delayMs: Long) {
         retryCounts[scenario.name] = retryCounts.getOrDefault(scenario.name, 0) + 1
-=======
+        sessionMetrics[sessionId]?.let {
+            sessionMetrics[sessionId] = it.copy(
+                resumeCount = it.resumeCount + 1,
+                scenarios = it.scenarios + scenario.name
+            )
+        }
+    }
+
     /**
      * Finalize a CONNECT tunnel record when the tunnel actually closes.
      * Tunnels can't use recordRequestEnd at handshake time (bytes=0,
@@ -293,16 +299,6 @@ object ProxyMetrics {
             category = prev?.category ?: categorizeUrl(prev?.url ?: "")
         )
         incrementScenario(scenario)
-    }
-
-    fun recordRetry(sessionId: String, requestId: String, attempt: Int, scenario: NetworkScenario, delayMs: Long) {        retryCounts[scenario.name] = retryCounts.getOrDefault(scenario.name, 0) + 1
->>>>>>> Stashed changes
-        sessionMetrics[sessionId]?.let {
-            sessionMetrics[sessionId] = it.copy(
-                resumeCount = it.resumeCount + 1,
-                scenarios = it.scenarios + scenario.name
-            )
-        }
     }
 
     fun incrementScenario(scenario: NetworkScenario) {
