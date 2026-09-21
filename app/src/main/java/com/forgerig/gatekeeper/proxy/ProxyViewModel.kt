@@ -95,6 +95,9 @@ class ProxyViewModel : ViewModel() {
 
     fun clearMetrics() {
         ProxyMetrics.clear()
+        // Requests/Transferred live in the bound service counters, not in
+        // ProxyMetrics — without this, Clear only ever zeroed Retries.
+        proxyService.value?.resetStats()
     }
 
     override fun onCleared() {
