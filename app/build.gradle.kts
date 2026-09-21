@@ -81,6 +81,15 @@ android {
     kotlinOptions {
         jvmTarget = "1.8"
     }
+    packaging {
+        resources {
+            excludes += setOf(
+                "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
+                "META-INF/versions/11/OSGI-INF/MANIFEST.MF",
+                "META-INF/versions/17/OSGI-INF/MANIFEST.MF"
+            )
+        }
+    }
 }
 
 dependencies {
@@ -94,4 +103,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
+    // X.509 issuance for the opt-in HTTPS split (local CA + per-host leafs).
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
+    testImplementation("junit:junit:4.13.2")
 }

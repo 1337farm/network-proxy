@@ -52,6 +52,7 @@ class MainActivity : AppCompatActivity() {
         var cleanupScriptExpanded = false
         val portInput = findViewById<TextInputEditText>(R.id.portInput)
         val metricsCheck = findViewById<MaterialCheckBox>(R.id.metricsCheck)
+        val mitmCheck = findViewById<MaterialCheckBox>(R.id.mitmCheck)
 
         val refreshScript = {
             val p = portInput.text.toString().toIntOrNull() ?: 3128
@@ -99,11 +100,19 @@ class MainActivity : AppCompatActivity() {
         startStopButton.setOnClickListener {
             val port = portInput.text.toString().toIntOrNull() ?: 8080
             val metricsEnabled = metricsCheck.isChecked
+            val mitmEnabled = mitmCheck.isChecked
 
             if (viewModel.isRunning.value == true) {
                 viewModel.stopProxy()
             } else {
-                viewModel.startProxy(port, metricsEnabled)
+                if (mitmEnabled && MitmCa.caPem(this) == null) {
+                    Toast.makeText(
+                        this,
+                        "MITM CA unavailable — starting opaque (install CA via Export below)",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+                viewModel.startProxy(port, metricsEnabled, mitmEnabled)
             }
             refreshScript()
         }
@@ -144,8 +153,172 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<MaterialButton>(R.id.clearButton)?.setOnClickListener {
             viewModel.clearMetrics()
+            ProxyMetrics.clearEvents()
             refreshStats()
             Toast.makeText(this, "Metrics cleared", Toast.LENGTH_SHORT).show()
+        }
+
+        refreshProvidersSummary()
+        findViewById<MaterialButton>(R.id.seedProvidersButton)?.setOnClickListener {
+            val store = ProviderBroker.store(this)
+            var added = 0
+            for (p in ProviderStore.wellKnown()) {
+                if (!store.providers.containsKey(p.id)) {
+                    store.providers[p.id] = p
+                    added++
+                }
+            }
+            ProviderBroker.save(this, store)
+            refreshProvidersSummary()
+            Toast.makeText(this, "Seeded $added providers — add keys next", Toast.LENGTH_SHORT).show()
+        }
+        findViewById<MaterialButton>(R.id.addKeyButton)?.setOnClickListener { showAddKeyDialog() }
+        findViewById<MaterialButton>(R.id.exportBackupButton)?.setOnClickListener { showExportBackupDialog() }
+        findViewById<MaterialButton>(R.id.importBackupButton)?.setOnClickListener { showImportBackupDialog() }
+        findViewById<MaterialButton>(R.id.exportCaButton)?.setOnClickListener { shareMitmCa() }
+    }
+
+    private fun refreshProvidersSummary() {
+        findViewById<TextView>(R.id.providersSummaryText)?.text =
+            ProviderBroker.store(this).summary()
+    }
+
+    private fun textInput(hint: String, secret: Boolean = false): android.widget.EditText {
+        return android.widget.EditText(this).apply {
+            this.hint = hint
+            layoutParams = android.widget.LinearLayout.LayoutParams(
+                android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = 12 }
+            if (secret) inputType =
+                android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+    }
+
+    /** Add-key dialog: provider picker + label + secret → sealed vault. */
+    private fun showAddKeyDialog() {
+        val store = ProviderBroker.store(this)
+        if (store.providers.isEmpty()) {
+            Toast.makeText(this, "Seed providers first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val ids = store.providers.keys.sorted().toTypedArray()
+        val spinner = android.widget.Spinner(this).apply {
+            adapter = android.widget.ArrayAdapter(
+                this@MainActivity, android.R.layout.simple_spinner_dropdown_item, ids
+            )
+        }
+        val label = textInput("Label (e.g. claude-personal)")
+        val secret = textInput("API key (sk-…)", secret = true)
+        val layout = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(48, 24, 48, 0)
+            addView(spinner); addView(label); addView(secret)
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Add provider key")
+            .setView(layout)
+            .setPositiveButton("Save") { _, _ ->
+                val pid = ids[spinner.selectedItemPosition]
+                val sec = secret.text.toString().trim()
+                if (sec.isEmpty()) {
+                    Toast.makeText(this, "Empty key — not saved", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                val p = store.providers[pid]!!
+                p.keys.add(
+                    ProviderStore.ApiKey(
+                        id = java.util.UUID.randomUUID().toString(),
+                        label = label.text.toString().trim().ifEmpty { "key-${p.keys.size + 1}" },
+                        secret = sec
+                    )
+                )
+                ProviderBroker.save(this, store)
+                refreshProvidersSummary()
+                Toast.makeText(this, "Key sealed for $pid", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Export dialog: password → share password-wrapped backup text. */
+    private fun showExportBackupDialog() {
+        if (!CredentialVault.exists(this)) {
+            Toast.makeText(this, "Vault empty — nothing to export", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val pw = textInput("Backup password", secret = true)
+        val layout = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(48, 24, 48, 0)
+            addView(pw)
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Export encrypted backup")
+            .setView(layout)
+            .setPositiveButton("Share") { _, _ ->
+                try {
+                    val backup = CredentialVault.exportBackup(this, pw.text.toString())
+                    val share = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, backup)
+                    }
+                    startActivity(Intent.createChooser(share, "Share vault backup"))
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Export failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Import dialog: paste backup + password → validate → seal. */
+    private fun showImportBackupDialog() {
+        val pw = textInput("Backup password", secret = true)
+        val blob = textInput("Paste backup (npbk1:…)")
+        val layout = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(48, 24, 48, 0)
+            addView(blob); addView(pw)
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Import encrypted backup")
+            .setView(layout)
+            .setPositiveButton("Import") { _, _ ->
+                try {
+                    CredentialVault.importBackup(this, blob.text.toString(), pw.text.toString())
+                    ProviderBroker.invalidate()
+                    refreshProvidersSummary()
+                    Toast.makeText(this, "Backup imported", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Share the MITM CA cert so the setup script can trust it. */
+    private fun shareMitmCa() {
+        val pem = MitmCa.caPem(this)
+        if (pem == null) {
+            Toast.makeText(this, "CA unavailable", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            val file = java.io.File(cacheDir, "network-proxy-ca.pem")
+            file.writeText(pem)
+            val uri = FileProvider.getUriForFile(
+                this, "${applicationContext.packageName}.fileprovider", file
+            )
+            val share = Intent(Intent.ACTION_SEND).apply {
+                type = "application/x-pem-file"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(share, "Share MITM CA (install in terminal)"))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Share failed: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -170,6 +343,20 @@ class MainActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.retriesText)?.text =
             if (snap.scenarioCounts.isEmpty()) "Retries: $retries"
             else "Retries: $retries (${snap.scenarioCounts.entries.joinToString { "${it.key}=${it.value}" }})"
+        findViewById<TextView>(R.id.tokensText)?.text =
+            "Tokens: in ${ProxyMetrics.inputTokens} / out ${ProxyMetrics.outputTokens} " +
+                "(cache r ${ProxyMetrics.cacheReadTokens} / w ${ProxyMetrics.cacheWriteTokens})"
+        val hosts = ProxyMetrics.hostSummary(3)
+        findViewById<TextView>(R.id.hostsText)?.text =
+            if (hosts.isEmpty()) ""
+            else hosts.joinToString("\n") { (h, up, down) -> "↕ $h ↑${humanBytes(up)} ↓${humanBytes(down)}" }
+        val events = ProxyMetrics.recentEvents(15)
+        findViewById<TextView>(R.id.eventsText)?.text =
+            if (events.isEmpty()) "No events yet — start the proxy." else events.joinToString("\n")
+        // Auto-scroll the feed to the newest entry (top after reverse).
+        findViewById<android.widget.ScrollView>(R.id.eventsScrollView)?.post {
+            findViewById<android.widget.ScrollView>(R.id.eventsScrollView)?.fullScroll(View.FOCUS_UP)
+        }
     }
 
     private fun humanBytes(bytes: Long): String {

@@ -1,9 +1,14 @@
 package com.forgerig.gatekeeper.proxy
 
+import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 
 data class MetricsSnapshot(
     val sessions: List<SessionMetrics> = emptyList(),
@@ -267,5 +272,119 @@ object ProxyMetrics {
         retryCounts.clear()
         sessionMetrics.clear()
         requestMetrics.clear()
+    }
+
+    // ---- Human-readable event log (logcat + in-app feed) ----
+    const val TAG = "NetworkProxy"
+    private const val MAX_EVENTS = 100
+    private val events = ConcurrentLinkedQueue<Pair<Long, String>>()
+    private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
+
+    /**
+     * Log sink, defaulting to logcat. Swappable in JVM unit tests where
+     * android.util.Log is stubbed out.
+     */
+    var logSink: (level: Int, msg: String, e: Throwable?) -> Unit = { level, msg, e ->
+        when (level) {
+            android.util.Log.WARN -> android.util.Log.w(TAG, msg)
+            android.util.Log.ERROR -> if (e != null) android.util.Log.e(TAG, msg, e) else android.util.Log.e(TAG, msg)
+            else -> android.util.Log.i(TAG, msg)
+        }
+    }
+
+    /** Timestamped line, kept in a capped ring buffer and mirrored to logcat. */
+    fun event(msg: String) {
+        val now = System.currentTimeMillis()
+        events.add(now to msg)
+        while (events.size > MAX_EVENTS) events.poll()
+        logSink(android.util.Log.INFO, msg, null)
+    }
+
+    fun eventWarning(msg: String) {
+        val now = System.currentTimeMillis()
+        events.add(now to "WARN: $msg")
+        while (events.size > MAX_EVENTS) events.poll()
+        logSink(android.util.Log.WARN, msg, null)
+    }
+
+    fun eventError(msg: String, e: Throwable? = null) {
+        val now = System.currentTimeMillis()
+        events.add(now to "ERROR: $msg")
+        while (events.size > MAX_EVENTS) events.poll()
+        logSink(android.util.Log.ERROR, msg, e)
+    }
+
+    /** Newest-first formatted lines for the in-app feed. */
+    fun recentEvents(limit: Int = 15): List<String> =
+        events.toList().takeLast(limit).reversed()
+            .map { (ts, msg) -> "${timeFmt.format(Date(ts))}  $msg" }
+
+    fun clearEvents() {
+        events.clear()
+    }
+
+    // ---- Traffic tallies: bytes per host (always visible, even inside
+    // CONNECT tunnels) + tokens (only when bodies are readable, i.e.
+    // plain-HTTP JSON/SSE carrying usage blocks; HTTPS tunnels are opaque).
+    data class HostTally(var upBytes: Long = 0, var downBytes: Long = 0)
+    private val hostTallies = ConcurrentHashMap<String, HostTally>()
+
+    // Token counters. Anthropic: input_tokens / output_tokens /
+    // cache_read_input_tokens / cache_creation_input_tokens.
+    // OpenAI: prompt_tokens / completion_tokens (+ cached_tokens detail).
+    @Volatile var inputTokens: Long = 0
+        private set
+    @Volatile var outputTokens: Long = 0
+        private set
+    @Volatile var cacheReadTokens: Long = 0
+        private set
+    @Volatile var cacheWriteTokens: Long = 0
+        private set
+
+    @Synchronized
+    fun addBytes(host: String, up: Long, down: Long) {
+        if (host.isBlank()) return
+        val t = hostTallies.getOrPut(host) { HostTally() }
+        t.upBytes += up
+        t.downBytes += down
+    }
+
+    @Synchronized
+    fun addTokens(input: Long, output: Long, cacheRead: Long, cacheWrite: Long) {
+        inputTokens += input
+        outputTokens += output
+        cacheReadTokens += cacheRead
+        cacheWriteTokens += cacheWrite
+    }
+
+    fun hostSummary(top: Int = 5): List<Triple<String, Long, Long>> =
+        hostTallies.entries.sortedByDescending { it.value.upBytes + it.value.downBytes }
+            .take(top).map { Triple(it.key, it.value.upBytes, it.value.downBytes) }
+
+    fun resetTallies() {
+        hostTallies.clear()
+        inputTokens = 0
+        outputTokens = 0
+        cacheReadTokens = 0
+        cacheWriteTokens = 0
+    }
+
+    // usage-block scanner: finds Anthropic + OpenAI token fields in a
+    // buffered body (plain JSON or SSE stream chunk). Returns
+    // (input, output, cacheRead, cacheWrite).
+    private val tokNum = { key: String, body: String ->
+        Regex(""""$key"\s*:\s*(\d+)""").findAll(body).map { it.groupValues[1].toLong() }.sum()
+    }
+
+    fun scanUsage(body: String): LongArray {
+        val anthIn = tokNum("input_tokens", body)
+        val anthOut = tokNum("output_tokens", body)
+        val cacheRead = tokNum("cache_read_input_tokens", body)
+        val cacheWrite = tokNum("cache_creation_input_tokens", body)
+        val oaiIn = tokNum("prompt_tokens", body)
+        val oaiOut = tokNum("completion_tokens", body)
+        // prompt_tokens INCLUDES cached tokens on OpenAI; keep raw sums.
+        val oaiCached = tokNum("cached_tokens", body)
+        return longArrayOf(anthIn + oaiIn, anthOut + oaiOut, cacheRead + oaiCached, cacheWrite)
     }
 }

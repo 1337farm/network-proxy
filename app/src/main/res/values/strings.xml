@@ -21,4 +21,15 @@
     <string name="cleanup_script_title">Terminal cleanup script</string>
     <string name="cleanup_script_hint">Copy and paste into Termux / proot Ubuntu to remove proxy env, kill daemon, clear metrics.</string>
     <string name="copy_cleanup_script">Copy cleanup script</string>
+    <string name="mitm_enabled">Decrypt HTTPS for token tally (install CA first)</string>
+    <string name="providers_title">Providers &amp; keys</string>
+    <string name="providers_hint">Brokered credentials: proxy injects the active key per provider and rolls over on 429/401. Secrets stay encrypted on-device.</string>
+    <string name="seed_providers">Seed providers</string>
+    <string name="add_key">Add key</string>
+    <string name="export_backup">Export backup</string>
+    <string name="import_backup">Import backup</string>
+    <string name="export_ca">Export MITM CA</string>
+    <string name="events_title">Recent events</string>
+    <string name="tokens_line">Tokens: in %1$d / out %2$d (cache r %3$d / w %4$d)</string>
+    <string name="hosts_line">Top host: %1$s</string>
 </resources>
