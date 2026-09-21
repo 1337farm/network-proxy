@@ -31,9 +31,11 @@ object SetupScript {
             |export HTTPS_PROXY="http://127.0.0.1:${port}"
             |export NO_PROXY="localhost,127.0.0.1"
             |grep -q "network-proxy (managed)" ~/.bashrc 2>/dev/null || cat >> ~/.bashrc <<'EOF'
+            |# >>> network-proxy (managed) >>>
             |export HTTP_PROXY="http://127.0.0.1:${port}"
             |export HTTPS_PROXY="http://127.0.0.1:${port}"
             |export NO_PROXY="localhost,127.0.0.1"
+            |# <<< network-proxy (managed) <<<
             |EOF
             |python3 -c "
             |import re,pathlib
@@ -48,9 +50,13 @@ object SetupScript {
         """.trimMargin()
     }
 
-    fun cleanup(): String {
+    fun cleanup(port: Int = 3128): String {
         return """
             |# >>> network-proxy cleanup (run in proot Ubuntu) >>>
+            |# NOTE: the proxy runs inside the Android app, not here — there
+            |# is no daemon pid lent to kill on this side. This only removes
+            |# the env/config this setup script added. Stop the app via its
+            |# Stop button to actually shut the proxy down.
             |if [[ -f ~/.bashrc ]]; then
             |  python3 - ~/.bashrc <<'PYEOF'
             |import sys
@@ -68,25 +74,25 @@ object SetupScript {
             |    if not skipping:
             |        out.append(ln)
             |open(rc, "w").writelines(out)
+            |print("Removed proxy env block from " + rc)
             |PYEOF
-            |  echo "Removed proxy env block from ~/.bashrc"
             |fi
-            |if [[ -f /tmp/network-proxy.pid ]] && kill "$(cat /tmp/network-proxy.pid)" 2>/dev/null; then
-            |  echo "Killed proxy daemon (pid $(cat /tmp/network-proxy.pid))"
-            |else
-            |  pkill -f "proxy --port 3128" 2>/dev/null && echo "Killed proxy daemon on port 3128" || true
-            |fi
-            |rm -f /tmp/network-proxy.pid /tmp/flaky.pid /tmp/proxy18080.pid 2>/dev/null
-            |pkill -f "flaky.py" 2>/dev/null && echo "Killed flaky test server" || true
             |if [ -n "${"$"}{PROXY_METRICS_FILE:-}" ]; then METRICS_FILE="${"$"}PROXY_METRICS_FILE"; else METRICS_FILE="${"$"}HOME/.cache/network-proxy/metrics.jsonl"; fi
             |if [[ -f "${"$"}METRICS_FILE" ]]; then
             |  > "${"$"}METRICS_FILE"
-            |  echo "Cleared metrics: ${"$"}METRICS_FILE"
+            |  echo "Cleared local metrics copy: ${"$"}METRICS_FILE"
             |fi
-            |unset HTTP_PROXY HTTPS_PROXY NO_PROXY
-            |echo "Unset HTTP_PROXY, HTTPS_PROXY, NO_PROXY"
+            |unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy
+            |echo "Unset proxy env vars (both cases)"
+            |echo "Checking proxy is no longer used..."
+            |if command -v curl >/dev/null 2>&1; then
+            |  curl -s -m 5 -o /dev/null -w "direct probe http_code=%{http_code}\n" https://api.github.com/zen || echo "(probe failed — check network)"
+            |else
+            |  python3 -c "import socket; s=socket.create_connection(('8.8.8.8',53),timeout=5); s.close(); print('direct connectivity OK (proxy bypassed)')"
+            |fi
             |echo "=== Cleanup complete ==="
-            |echo "Run 'source ~/.bashrc' or open a new terminal to fully apply."
+            |echo "To stop the actual proxy, tap Stop in the Android app."
+            |echo "Then run 'source ~/.bashrc' or open a new terminal to fully apply."
             |# <<< network-proxy cleanup <<<
         """.trimMargin()
     }

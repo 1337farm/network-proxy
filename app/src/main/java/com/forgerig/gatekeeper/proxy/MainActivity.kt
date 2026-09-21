@@ -56,7 +56,7 @@ class MainActivity : AppCompatActivity() {
         val refreshScript = {
             val p = portInput.text.toString().toIntOrNull() ?: 3128
             setupScriptText.text = SetupScript.build(this, p)
-            cleanupScriptText.text = SetupScript.cleanup()
+            cleanupScriptText.text = SetupScript.cleanup(p)
         }
         portInput.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
