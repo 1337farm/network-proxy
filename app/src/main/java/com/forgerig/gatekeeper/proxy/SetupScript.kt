@@ -27,9 +27,15 @@ object SetupScript {
 
     fun build(context: Context, port: Int): String {
         return """
+            |# >>> network-proxy setup (run in proot Ubuntu) >>>
+            |# NOTE: the proxy itself runs inside the Android app on this
+            |# phone — this only routes this terminal through it. Start the
+            |# app with the Start button first, then paste this block.
             |export HTTP_PROXY="http://127.0.0.1:${port}"
             |export HTTPS_PROXY="http://127.0.0.1:${port}"
             |export NO_PROXY="localhost,127.0.0.1"
+            |# Persist the same env into ~/.bashrc inside fenced markers, so
+            |# the cleanup script can find and remove exactly this block.
             |grep -q "network-proxy (managed)" ~/.bashrc 2>/dev/null || cat >> ~/.bashrc <<'EOF'
             |# >>> network-proxy (managed) >>>
             |export HTTP_PROXY="http://127.0.0.1:${port}"
@@ -37,6 +43,7 @@ object SetupScript {
             |export NO_PROXY="localhost,127.0.0.1"
             |# <<< network-proxy (managed) <<<
             |EOF
+            |# Tell opencode to absorb 429s itself (proxy also retries).
             |python3 -c "
             |import re,pathlib
             |p=pathlib.Path.home()/'.config/opencode/opencode.jsonc'
@@ -46,7 +53,9 @@ object SetupScript {
             |p.write_text(t)
             |print('opencode.jsonc: maxRetries=3 retryDelay=2000')
             |"
+            |# Sanity probe: fail fast here if the app proxy isn't listening.
             |python3 -c "import socket; s=socket.create_connection(('127.0.0.1',${port}), timeout=5); s.close(); print('proxy probe: listening on 127.0.0.1:${port}')"
+            |# <<< network-proxy setup <<<
         """.trimMargin()
     }
 

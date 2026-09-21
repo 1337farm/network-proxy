@@ -41,10 +41,22 @@ android {
     }
 
     signingConfigs {
-        // Release signing: CI generates ~/.android/debug.keystore before
-        // assembleRelease; use it via env overrides so the release APK is
-        // actually produced (unsigned release variant is skipped by AGP,
-        // which broke the rolling `latest` publish).
+        // Stable demo certificate (keystore/network-proxy-demo.keystore, a
+        // committed demo-only key) so every CI build installs as an update.
+        // Falls back to the ephemeral debug key when the file is absent
+        // (fresh clones before the keystore lands, forks).
+        val demoKs = rootProject.file("keystore/network-proxy-demo.keystore")
+        create("demo") {
+            if (demoKs.exists()) {
+                storeFile = demoKs
+                storePassword = System.getenv("DEMO_KEYSTORE_PASSWORD") ?: "networkproxy"
+                keyAlias = "demo"
+                keyPassword = System.getenv("DEMO_KEY_PASSWORD") ?: "networkproxy"
+            }
+        }
+        // CI fallback: ephemeral debug keystore generated before
+        // assembleRelease, so the release APK is always produced even when
+        // the demo keystore is absent.
         val homeDir = System.getenv("HOME") ?: System.getProperty("user.home")
         create("ciDebug") {
             storeFile = file(System.getenv("DEBUG_KEYSTORE") ?: "$homeDir/.android/debug.keystore")
@@ -57,7 +69,8 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("ciDebug")
+            signingConfig = if (rootProject.file("keystore/network-proxy-demo.keystore").exists())
+                signingConfigs.getByName("demo") else signingConfigs.getByName("ciDebug")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
