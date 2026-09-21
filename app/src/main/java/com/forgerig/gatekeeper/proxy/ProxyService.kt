@@ -47,7 +47,7 @@ class ProxyService : Service() {
     @Volatile private var lastError: String? = null
     private var port = 8080
     private var metricsEnabled = true
-    private var mitmEnabled = false
+    private var mitmEnabled = true
     private var client: OkHttpClient? = null
     private var serverThread: Thread? = null
     private var pool = Executors.newFixedThreadPool(POOL_SIZE)
@@ -93,7 +93,7 @@ class ProxyService : Service() {
         }
         port = intent?.getIntExtra("port", 8080) ?: 8080
         metricsEnabled = intent?.getBooleanExtra("metricsEnabled", true) ?: true
-        mitmEnabled = intent?.getBooleanExtra("mitmEnabled", false) ?: false
+        mitmEnabled = intent?.getBooleanExtra("mitmEnabled", true) ?: true
 
         if (running.get() == 1) {
             ProxyMetrics.event("Restart requested on :$port — draining old listener")

@@ -92,47 +92,47 @@ object SetupScript {
             |# If 'opencode serve' is already running, RESTART it from this shell:
             |# exports only affect servers started after them (check with:
             |# tr '\\0' '\\n' </proc/$(pgrep -f '^opencode serve' | head -1)/environ | grep -i proxy).
-            |# Sanity probe: fail fast here if the app proxy isn't listening.
-            |# Read-only: safe to run any number of times.
-            |python3 -c "import socket,sys; s=socket.create_connection(('127.0.0.1',${port}), timeout=5); s.close(); print('proxy probe: listening on 127.0.0.1:${port}')"
-            |# --- MITM CA trust (only matters when Decrypt-HTTPS is ON) ---
-            |# Takes the CA you shared via Export MITM CA and trusts it for
-            |# this terminal: Ubuntu store (best effort), Termux/Python/Node
-            |# bundles, plus persistent exports. Skips cleanly when absent.
-            |CA_PEM=""
-            |for c in /sdcard/Download/network-proxy-ca.pem "${"$"}HOME/Download/network-proxy-ca.pem" "${"$"}HOME/.config/network-proxy/ca.pem"; do
-            |  if [[ -f "${"$"}c" ]]; then CA_PEM="${"$"}c"; break; fi
-            |done
-            |if [[ -n "${"$"}CA_PEM" ]]; then
-            |  mkdir -p "${"$"}HOME/.config/network-proxy"
-            |  cp "${"$"}CA_PEM" "${"$"}HOME/.config/network-proxy/ca.pem"
-            |  SYS_BUNDLE=""; for b in /etc/ssl/certs/ca-certificates.crt "${"$"}PREFIX/etc/tls/cert.pem"; do
-            |    if [[ -f "${"$"}b" ]]; then SYS_BUNDLE="${"$"}b"; break; fi
-            |  done
-            |  if [[ -n "${"$"}SYS_BUNDLE" ]]; then
-            |    cat "${"$"}SYS_BUNDLE" "${"$"}HOME/.config/network-proxy/ca.pem" > "${"$"}HOME/.config/network-proxy/bundle.pem"
-            |    export SSL_CERT_FILE="${"$"}HOME/.config/network-proxy/bundle.pem"
-            |    export REQUESTS_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"
-            |    export NODE_EXTRA_CA_CERTS="${"$"}HOME/.config/network-proxy/ca.pem"
-            |  fi
-            |  if [[ -d /usr/local/share/ca-certificates ]]; then
-            |    cp "${"$"}HOME/.config/network-proxy/ca.pem" /usr/local/share/ca-certificates/network-proxy-ca.crt 2>/dev/null || true
-            |    update-ca-certificates 2>/dev/null || true
-            |  fi
-            |  if ! grep -q "network-proxy-ca" ~/.bashrc 2>/dev/null; then
-            |    cat >> ~/.bashrc <<'CAEOF'
-            |# >>> network-proxy-ca (managed) >>>
-            |export SSL_CERT_FILE="${"$"}HOME/.config/network-proxy/bundle.pem"
-            |export REQUESTS_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"
-            |export NODE_EXTRA_CA_CERTS="${"$"}HOME/.config/network-proxy/ca.pem"
-            |# <<< network-proxy-ca (managed) <<<
-            |CAEOF
-            |  fi
-            |  echo "MITM CA trusted for this terminal (bundle rebuilt)"
-            |else
-            |  echo "MITM CA not found — skipping (Export MITM CA from the app to enable)"
-            |fi
-            |# <<< network-proxy setup <<<
+|# Sanity probe: fail fast here if the app proxy isn't listening.
+             |# Read-only: safe to run any number of times.
+             |python3 -c "import socket,sys; s=socket.create_connection(('127.0.0.1',${port}), timeout=5); s.close(); print('proxy probe: listening on 127.0.0.1:${port}')"
+             |# --- MITM CA trust (always on) ---
+             |# Takes the CA embedded in the app and trusts it for
+             |# this terminal: Ubuntu store (best effort), Termux/Python/Node
+             |# bundles, plus persistent exports. Skips cleanly when absent.
+             |CA_PEM=""
+             |for c in /sdcard/Download/network-proxy-ca.pem "${"$"}HOME/Download/network-proxy-ca.pem" "${"$"}HOME/.config/network-proxy/ca.pem"; do
+             |  if [[ -f "${"$"}c" ]]; then CA_PEM="${"$"}c"; break; fi
+             |done
+             |if [[ -n "${"$"}CA_PEM" ]]; then
+             |  mkdir -p "${"$"}HOME/.config/network-proxy"
+             |  cp "${"$"}CA_PEM" "${"$"}HOME/.config/network-proxy/ca.pem"
+             |  SYS_BUNDLE=""; for b in /etc/ssl/certs/ca-certificates.crt "${"$"}PREFIX/etc/tls/cert.pem"; do
+             |    if [[ -f "${"$"}b" ]]; then SYS_BUNDLE="${"$"}b"; break; fi
+             |  done
+             |  if [[ -n "${"$"}SYS_BUNDLE" ]]; then
+             |    cat "${"$"}SYS_BUNDLE" "${"$"}HOME/.config/network-proxy/ca.pem" > "${"$"}HOME/.config/network-proxy/bundle.pem"
+             |    export SSL_CERT_FILE="${"$"}HOME/.config/network-proxy/bundle.pem"
+             |    export REQUESTS_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"
+             |    export NODE_EXTRA_CA_CERTS="${"$"}HOME/.config/network-proxy/ca.pem"
+             |  fi
+             |  if [[ -d /usr/local/share/ca-certificates ]]; then
+             |    cp "${"$"}HOME/.config/network-proxy/ca.pem" /usr/local/share/ca-certificates/network-proxy-ca.crt 2>/dev/null || true
+             |    update-ca-certificates 2>/dev/null || true
+             |  fi
+             |  if ! grep -q "network-proxy-ca" ~/.bashrc 2>/dev/null; then
+             |    cat >> ~/.bashrc <<'CAEOF'
+             |# >>> network-proxy-ca (managed) >>>
+             |export SSL_CERT_FILE="${"$"}HOME/.config/network-proxy/bundle.pem"
+             |export REQUESTS_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"
+             |export NODE_EXTRA_CA_CERTS="${"$"}HOME/.config/network-proxy/ca.pem"
+             |# <<< network-proxy-ca (managed) <<<
+             |CAEOF
+             |  fi
+             |  echo "MITM CA trusted for this terminal (bundle rebuilt)"
+             |else
+             |  echo "MITM CA not found — HTTPS will be tunneled opaque (no MITM)"
+             |fi
+             |# <<< network-proxy setup <<<
         """.trimMargin()
     }
 
