@@ -71,6 +71,14 @@ class SetupScriptTest {
             "NODE_EXTRA_CA_CERTS must be in the above-guard block",
             bashrcStep.contains("export NODE_EXTRA_CA_CERTS=")
         )
+        assertTrue(
+            "CURL_CA_BUNDLE must be in the above-guard block (curl/openssl clients)",
+            bashrcStep.contains("export CURL_CA_BUNDLE=")
+        )
+        assertTrue(
+            "GIT_SSL_CAINFO must be in the above-guard block (git via proxy MITM)",
+            bashrcStep.contains("export GIT_SSL_CAINFO=")
+        )
         // ...and must NOT be appended below the guard anymore.
         val appendIdx = script.indexOf("cat >> ~/.bashrc")
         assertTrue(
