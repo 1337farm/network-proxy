@@ -351,7 +351,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.retriesText)?.text =
             if (snap.scenarioCounts.isEmpty()) "Retries: $retries"
             else "Retries: $retries (${snap.scenarioCounts.entries.joinToString { "${it.key}=${it.value}" }})"
-        findViewById<TextView>(R.id.tokensText)?.text = tokenTable()
+        renderTokensTable()
         val hosts = ProxyMetrics.hostSummary(3)
         findViewById<TextView>(R.id.hostsText)?.text =
             if (hosts.isEmpty()) ""
@@ -365,18 +365,63 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Fixed-width per-host token table (see StatsFormat: cells are
-     *  humanized to constant width so columns can't drift). */
-    private fun tokenTable(): String {
+    /** Real table widget: header + per-host rows + TOTAL + footer line. */
+    private fun renderTokensTable() {
+        val table = findViewById<android.widget.TableLayout>(R.id.tokensTable) ?: return
+        val footer = findViewById<TextView>(R.id.tokensFooterText)
         val rows = ProxyMetrics.tokenSummary(5)
-        return StatsFormat.tokenTable(
-            rows,
-            StatsFormat.Totals(
-                ProxyMetrics.inputTokens, ProxyMetrics.outputTokens,
-                ProxyMetrics.cacheReadTokens, ProxyMetrics.cacheWriteTokens
-            ),
-            ProxyMetrics.outputTokensPerSecond()
+        val tps = String.format(java.util.Locale.US, "%.1f", ProxyMetrics.outputTokensPerSecond())
+        table.removeAllViews()
+        if (rows.isEmpty()) {
+            table.visibility = View.GONE
+            footer?.text = "Tokens: in 0 / out 0 @ $tps tok/s"
+            return
+        }
+        table.visibility = View.VISIBLE
+        val violet = getColor(R.color.title_violet)
+        table.addView(tableRow(listOf("host", "in", "out", "cacheR", "cacheW"), header = true, violet = violet))
+        for (r in rows) {
+            table.addView(
+                tableRow(
+                    listOf(
+                        r.host, StatsFormat.humanTokens(r.inTokens).trim(),
+                        StatsFormat.humanTokens(r.outTokens).trim(),
+                        StatsFormat.humanTokens(r.cacheRead).trim(),
+                        StatsFormat.humanTokens(r.cacheWrite).trim()
+                    )
+                )
+            )
+        }
+        table.addView(
+            tableRow(
+                listOf(
+                    "TOTAL", StatsFormat.humanTokens(ProxyMetrics.inputTokens).trim(),
+                    StatsFormat.humanTokens(ProxyMetrics.outputTokens).trim(),
+                    StatsFormat.humanTokens(ProxyMetrics.cacheReadTokens).trim(),
+                    StatsFormat.humanTokens(ProxyMetrics.cacheWriteTokens).trim()
+                ),
+                bold = true
+            )
         )
+        footer?.text = "@ $tps tok/s"
+    }
+
+    private fun tableRow(cells: List<String>, header: Boolean = false, bold: Boolean = false, violet: Int = 0): android.widget.TableRow {
+        val row = android.widget.TableRow(this)
+        cells.forEachIndexed { i, text ->
+            val tv = TextView(this)
+            tv.text = text
+            tv.textSize = 12f
+            tv.typeface = android.graphics.Typeface.MONOSPACE
+            if (header || bold) tv.setTypeface(tv.typeface, android.graphics.Typeface.BOLD)
+            if (header && violet != 0) tv.setTextColor(violet)
+            tv.gravity = if (i == 0) android.view.Gravity.START else android.view.Gravity.END
+            tv.setPadding(0, 2, if (i == 0) 8 else 4, 2)
+            tv.ellipsize = android.text.TextUtils.TruncateAt.END
+            tv.maxLines = 1
+            row.addView(tv)
+        }
+        return row
     }
 
     private fun humanBytes(bytes: Long): String {

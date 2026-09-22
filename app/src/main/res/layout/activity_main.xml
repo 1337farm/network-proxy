@@ -133,15 +133,23 @@
                         android:layout_height="wrap_content"
                         android:text="Retries: 0"/>
 
-                    <TextView
-                        android:id="@+id/tokensText"
+                    <TableLayout
+                        android:id="@+id/tokensTable"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
-                        android:text="Tokens: in 0 / out 0 (cache r 0 / w 0)"
+                        android:stretchColumns="1,2,3,4"
+                        android:shrinkColumns="0">
+                    </TableLayout>
+
+                    <TextView
+                        android:id="@+id/tokensFooterText"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
                         android:textSize="12sp"
                         android:fontFamily="monospace"
-                        android:textColor="@color/title_violet"/>
+                        android:textColor="@color/title_violet"
+                        android:text=""/>
 
                     <TextView
                         android:id="@+id/hostsText"
