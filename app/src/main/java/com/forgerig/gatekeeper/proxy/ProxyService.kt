@@ -238,6 +238,14 @@ class ProxyService : Service() {
                 body = readExact(rawIn, contentLength.toInt())
             }
 
+            // --- Context layer (smart router, phase 1: gated hook only). ---
+            // When enabled and the body parses as a known LLM wire format,
+            // the decision carries the correlated conversation; the legacy
+            // path below still does the forwarding (null = untouched).
+            @Suppress("UNUSED_VARIABLE")
+            val ctxDecision = com.forgerig.gatekeeper.proxy.context.ContextLayer
+                .maybeProcess(targetUrl, method, body)
+
             // --- Custom-route rewrite ("we are the provider"): if the
             // request body names one of OUR model ids, swap in the first
             // healthy leg (provider + upstream model) and retarget the URL.

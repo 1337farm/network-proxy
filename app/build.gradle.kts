@@ -106,4 +106,7 @@ dependencies {
     // X.509 issuance for the opt-in HTTPS split (local CA + per-host leafs).
     implementation("org.bouncycastle:bcpkix-jdk18on:1.78.1")
     testImplementation("junit:junit:4.13.2")
+    // Real org.json on the JVM test classpath (Android framework stubs
+    // throw "not mocked" without it); context-layer adapters parse JSON.
+    testImplementation("org.json:json:20240303")
 }
