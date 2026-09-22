@@ -139,7 +139,8 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
                         android:text="Tokens: in 0 / out 0 (cache r 0 / w 0)"
-                        android:textSize="13sp"
+                        android:textSize="12sp"
+                        android:fontFamily="monospace"
                         android:textColor="@color/title_violet"/>
 
                     <TextView

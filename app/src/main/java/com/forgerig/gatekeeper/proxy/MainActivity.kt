@@ -327,10 +327,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.retriesText)?.text =
             if (snap.scenarioCounts.isEmpty()) "Retries: $retries"
             else "Retries: $retries (${snap.scenarioCounts.entries.joinToString { "${it.key}=${it.value}" }})"
-        findViewById<TextView>(R.id.tokensText)?.text =
-            "Tokens: in ${ProxyMetrics.inputTokens} / out ${ProxyMetrics.outputTokens} " +
-                "(cache r ${ProxyMetrics.cacheReadTokens} / w ${ProxyMetrics.cacheWriteTokens}) " +
-                "@ ${String.format("%.1f", ProxyMetrics.outputTokensPerSecond())} tok/s"
+        findViewById<TextView>(R.id.tokensText)?.text = tokenTable()
         val hosts = ProxyMetrics.hostSummary(3)
         findViewById<TextView>(R.id.hostsText)?.text =
             if (hosts.isEmpty()) ""
@@ -342,6 +339,30 @@ class MainActivity : AppCompatActivity() {
         findViewById<android.widget.ScrollView>(R.id.eventsScrollView)?.post {
             findViewById<android.widget.ScrollView>(R.id.eventsScrollView)?.fullScroll(View.FOCUS_UP)
         }
+    }
+
+    /** Aligned per-host token table + totals (tokensText is monospace). */
+    private fun tokenTable(): String {
+        val rows = ProxyMetrics.tokenSummary(5)
+        val tps = String.format(java.util.Locale.US, "%.1f", ProxyMetrics.outputTokensPerSecond())
+        if (rows.isEmpty()) return "Tokens: in 0 / out 0 @ $tps tok/s"
+        val sb = StringBuilder()
+        sb.append(String.format(
+            java.util.Locale.US, "%-18s %7s %7s %7s %7s",
+            "host", "in", "out", "cacheR", "cacheW"
+        ))
+        for (r in rows) {
+            sb.append("\n").append(String.format(
+                java.util.Locale.US, "%-18s %7d %7d %7d %7d",
+                r.host.take(18), r.inTokens, r.outTokens, r.cacheRead, r.cacheWrite
+            ))
+        }
+        sb.append("\n").append(String.format(
+            java.util.Locale.US, "%-18s %7d %7d %7d %7d  @ %s tok/s",
+            "TOTAL", ProxyMetrics.inputTokens, ProxyMetrics.outputTokens,
+            ProxyMetrics.cacheReadTokens, ProxyMetrics.cacheWriteTokens, tps
+        ))
+        return sb.toString()
     }
 
     private fun humanBytes(bytes: Long): String {

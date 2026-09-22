@@ -146,4 +146,28 @@ class UsageStreamTest {
         assertEquals(0.0, ProxyMetrics.outputTokensPerSecond(), 0.0)
         ProxyMetrics.resetTallies()
     }
+
+    @Test
+    fun perHostTalliesFeedTableAndTotals() {
+        ProxyMetrics.resetTallies()
+        ProxyMetrics.addTokens(7843, 14, 113, 0, "openrouter.ai")
+        ProxyMetrics.addTokens(100, 200, 0, 0, "integrate.api.nvidia.com")
+        ProxyMetrics.addTokens(10, 0, 0, 0) // no host: totals only
+        // Globals are the totals row.
+        assertEquals(7953L, ProxyMetrics.inputTokens)
+        assertEquals(214L, ProxyMetrics.outputTokens)
+        assertEquals(113L, ProxyMetrics.cacheReadTokens)
+        // Per-host rows sorted by volume desc.
+        val rows = ProxyMetrics.tokenSummary(5)
+        assertEquals(2, rows.size)
+        assertEquals("openrouter.ai", rows[0].host)
+        assertEquals(7843L, rows[0].inTokens)
+        assertEquals(14L, rows[0].outTokens)
+        assertEquals(113L, rows[0].cacheRead)
+        assertEquals("integrate.api.nvidia.com", rows[1].host)
+        // Reset clears rows and totals together.
+        ProxyMetrics.resetTallies()
+        assertTrue(ProxyMetrics.tokenSummary(5).isEmpty())
+        assertEquals(0L, ProxyMetrics.inputTokens)
+    }
 }
