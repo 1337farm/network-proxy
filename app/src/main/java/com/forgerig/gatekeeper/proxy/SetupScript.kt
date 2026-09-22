@@ -26,12 +26,19 @@ object SetupScript {
     }
 
     /** Setup script. Safe to paste multiple times: bashrc append is
-     *  marker-guarded, the jsonc edit converges, the probe is read-only. */
-    fun build(context: Context, port: Int): String {
+     *  marker-guarded, the jsonc edit converges, the probe is read-only.
+     *  NOTE: the emitted script must stay pure ASCII (no em-dashes, no
+     *  smart quotes, no arrows) — proot/Termux locales mangle multibyte
+     *  chars on paste and corrupt the paste. [scriptFor] is the pure,
+     *  unit-tested core; [build] keeps the Context signature for callers. */
+    fun build(context: Context, port: Int): String = scriptFor(port)
+
+    /** Pure core: no Context needed, safe to call from JVM unit tests. */
+    fun scriptFor(port: Int): String {
         return """
             |# >>> network-proxy setup (run in proot Ubuntu) >>>
             |# NOTE: the proxy itself runs inside the Android app on this
-            |# phone — this only routes this terminal through it. Start the
+            |# phone - this only routes this terminal through it. Start the
             |# app with the Start button first, then paste this block.
             |# Safe to run repeatedly: every step below converges.
             |export HTTP_PROXY="http://127.0.0.1:${port}" HTTPS_PROXY="http://127.0.0.1:${port}" NO_PROXY="localhost,127.0.0.1,::1"
@@ -92,12 +99,14 @@ object SetupScript {
             |# If 'opencode serve' is already running, RESTART it from this shell:
             |# exports only affect servers started after them (check with:
             |# tr '\\0' '\\n' </proc/$(pgrep -f '^opencode serve' | head -1)/environ | grep -i proxy).
-|# Sanity probe: fail fast here if the app proxy isn't listening.
-             |# Read-only: safe to run any number of times.
-             |python3 -c "import socket,sys; s=socket.create_connection(('127.0.0.1',${port}), timeout=5); s.close(); print('proxy probe: listening on 127.0.0.1:${port}')"
+             |# Sanity probe: warn (don't abort) if the app proxy isn't up yet.
+             |# The proxy port may still be starting; the CA fetch + trust
+             |# steps below tolerate that and fall back to exported files.
+             |python3 -c "import socket; s=socket.create_connection(('127.0.0.1',${port}), timeout=5); s.close(); print('proxy probe: listening on 127.0.0.1:${port}')" || \
+             |  echo "proxy probe: 127.0.0.1:${port} refused - start the app proxy, then re-paste this script"
              |# --- MITM CA trust (only matters when Decrypt-HTTPS is ON) ---
-             |# Fetches the CA straight from the running proxy — no manual
-             |# Export step: `curl http://127.0.0.1:${port}/ca.pem` (works
+             |# Fetches the CA straight from the running proxy - no manual
+             |# Export step: \`curl http://127.0.0.1:${port}/ca.pem\` (works
              |# with or without proxy env, direct-to-port included). Falls
              |# back to a previously exported file when the proxy isn't up.
              |# Trusted for this terminal: Ubuntu store (best effort),
@@ -108,7 +117,7 @@ object SetupScript {
              |CA_TMP="${"$"}HOME/.config/network-proxy/ca.pem"
              |mkdir -p "${"$"}HOME/.config/network-proxy"
              |if command -v curl >/dev/null 2>&1; then
-             |  curl -sS -m 10 --noproxy '*' "http://127.0.0.1:${port}/ca.pem" -o "${"$"}CA_TMP.tmp" 2>/dev/null && \\
+             |  curl -sS -m 10 --noproxy '*' "http://127.0.0.1:${port}/ca.pem" -o "${"$"}CA_TMP.tmp" 2>/dev/null && \
              |    grep -q "BEGIN CERTIFICATE" "${"$"}CA_TMP.tmp" 2>/dev/null && mv "${"$"}CA_TMP.tmp" "${"$"}CA_TMP" && echo "MITM CA fetched from proxy (:${port}/ca.pem)"
              |  rm -f "${"$"}CA_TMP.tmp" 2>/dev/null || true
              |fi
@@ -143,7 +152,7 @@ object SetupScript {
              |  fi
              |  echo "MITM CA trusted for this terminal (bundle rebuilt)"
              |else
-             |  echo "MITM CA not found — HTTPS will be tunneled opaque (no MITM)"
+             |  echo "MITM CA not found - HTTPS will be tunneled opaque (no MITM)"
              |fi
              |# <<< network-proxy setup <<<
         """.trimMargin()
@@ -156,7 +165,7 @@ object SetupScript {
     fun cleanup(port: Int = 3128): String {
         return """
             |# >>> network-proxy cleanup (run in proot Ubuntu) >>>
-            |# NOTE: the proxy runs inside the Android app, not here — there
+            |# NOTE: the proxy runs inside the Android app, not here - there
             |# is no daemon pid lent to kill on this side. This only removes
             |# the env/config this setup script added. Stop the app via its
             |# Stop button to actually shut the proxy down.
@@ -195,7 +204,7 @@ object SetupScript {
             |        removed += 1
             |        continue
             |    kept.append((i, ln))
-            |# Pass 2: drop orphan heredoc closers — a bare EOF immediately
+            |# Pass 2: drop orphan heredoc closers - a bare EOF immediately
             |# following a removed line is debris from our own old block.
             |final = [(i, ln) for (i, ln) in kept
             |        if not (ln.strip() == "EOF" and (i - 1) in removed_idx)]
@@ -214,9 +223,9 @@ object SetupScript {
             |echo "Unset proxy env vars (both cases; re-running is a no-op)"
             |echo "Checking proxy is no longer used..."
             |if command -v curl >/dev/null 2>&1; then
-            |  curl -s -m 5 -o /dev/null -w "direct probe http_code=%{http_code}\n" https://api.github.com/zen || echo "(probe failed — check network)"
+            |  curl -s -m 5 -o /dev/null -w "direct probe http_code=%{http_code}\n" https://api.github.com/zen || echo "(probe failed - check network)"
             |else
-            |  python3 -c "import socket; s=socket.create_connection(('8.8.8.8',53),timeout=5); s.close(); print('direct connectivity OK (proxy bypassed)')" 2>/dev/null || echo "(probe failed — check network)"
+            |  python3 -c "import socket; s=socket.create_connection(('8.8.8.8',53),timeout=5); s.close(); print('direct connectivity OK (proxy bypassed)')" 2>/dev/null || echo "(probe failed - check network)"
             |fi
             |echo "=== Cleanup complete ==="
             |echo "To stop the actual proxy, tap Stop in the Android app."
