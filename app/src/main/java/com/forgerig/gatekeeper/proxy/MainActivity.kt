@@ -329,7 +329,8 @@ class MainActivity : AppCompatActivity() {
             else "Retries: $retries (${snap.scenarioCounts.entries.joinToString { "${it.key}=${it.value}" }})"
         findViewById<TextView>(R.id.tokensText)?.text =
             "Tokens: in ${ProxyMetrics.inputTokens} / out ${ProxyMetrics.outputTokens} " +
-                "(cache r ${ProxyMetrics.cacheReadTokens} / w ${ProxyMetrics.cacheWriteTokens})"
+                "(cache r ${ProxyMetrics.cacheReadTokens} / w ${ProxyMetrics.cacheWriteTokens}) " +
+                "@ ${String.format("%.1f", ProxyMetrics.outputTokensPerSecond())} tok/s"
         val hosts = ProxyMetrics.hostSummary(3)
         findViewById<TextView>(R.id.hostsText)?.text =
             if (hosts.isEmpty()) ""
