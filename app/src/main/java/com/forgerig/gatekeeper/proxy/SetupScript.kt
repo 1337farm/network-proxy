@@ -128,6 +128,10 @@ object SetupScript {
              |fi
              |if [[ -s "${"$"}CA_TMP" ]]; then
              |  CA_PEM="${"$"}CA_TMP"
+             |  # A refreshed app build regenerates the CA (new key) when the
+             |  # on-device CA is stale: always rebuild the bundle from the
+             |  # freshly fetched CA, never reuse a bundle from a previous CA.
+             |  rm -f "${"$"}HOME/.config/network-proxy/bundle.pem"
              |  SYS_BUNDLE=""; for b in /etc/ssl/certs/ca-certificates.crt "${"$"}PREFIX/etc/tls/cert.pem"; do
              |    if [[ -f "${"$"}b" ]]; then SYS_BUNDLE="${"$"}b"; break; fi
              |  done
