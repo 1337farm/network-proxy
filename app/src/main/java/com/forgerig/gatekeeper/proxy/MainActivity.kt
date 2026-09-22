@@ -60,11 +60,9 @@ class MainActivity : AppCompatActivity() {
         val portInput = findViewById<TextInputEditText>(R.id.portInput)
         val metricsCheck = findViewById<MaterialCheckBox>(R.id.metricsCheck)
         val mitmCheck = findViewById<MaterialCheckBox>(R.id.mitmCheck)
-        // Decrypt-HTTPS auto-enables when the CA is ready; the toggle
-        // remains as an explicit opt-out.
-        if (MitmCa.caPem(this) != null && !prefs().contains(KEY_MITM)) {
-            mitmCheck.isChecked = true
-        }
+        // Layout defaults Decrypt-HTTPS to checked; the service pre-loads
+        // (and if needed, generates) the CA off the UI thread on start —
+        // no main-thread crypto here.
 
         // Auto-start: ensure the proxy is running on app start unless the
         // user explicitly stopped it (Stop persists the opt-out).
@@ -127,7 +125,7 @@ class MainActivity : AppCompatActivity() {
                 viewModel.stopProxy()
             } else {
                 prefs().edit().putBoolean(KEY_SHOULD_RUN, true).apply()
-                if (mitmEnabled && MitmCa.caPem(this) == null) {
+                if (mitmEnabled && !MitmCa.caCertFile(this).exists()) {
                     Toast.makeText(
                         this,
                         "MITM CA unavailable — starting opaque",
@@ -380,25 +378,27 @@ class MainActivity : AppCompatActivity() {
         table.visibility = View.VISIBLE
         val violet = getColor(R.color.title_violet)
         table.addView(tableRow(listOf("host", "in", "out", "cacheR", "cacheW"), header = true, violet = violet))
+        table.addView(dividerRow())
         for (r in rows) {
             table.addView(
                 tableRow(
                     listOf(
-                        r.host, StatsFormat.humanTokens(r.inTokens).trim(),
-                        StatsFormat.humanTokens(r.outTokens).trim(),
-                        StatsFormat.humanTokens(r.cacheRead).trim(),
-                        StatsFormat.humanTokens(r.cacheWrite).trim()
+                        r.host, StatsFormat.humanTokens(r.inTokens),
+                        StatsFormat.humanTokens(r.outTokens),
+                        StatsFormat.humanTokens(r.cacheRead),
+                        StatsFormat.humanTokens(r.cacheWrite)
                     )
                 )
             )
         }
+        table.addView(dividerRow())
         table.addView(
             tableRow(
                 listOf(
-                    "TOTAL", StatsFormat.humanTokens(ProxyMetrics.inputTokens).trim(),
-                    StatsFormat.humanTokens(ProxyMetrics.outputTokens).trim(),
-                    StatsFormat.humanTokens(ProxyMetrics.cacheReadTokens).trim(),
-                    StatsFormat.humanTokens(ProxyMetrics.cacheWriteTokens).trim()
+                    "TOTAL", StatsFormat.humanTokens(ProxyMetrics.inputTokens),
+                    StatsFormat.humanTokens(ProxyMetrics.outputTokens),
+                    StatsFormat.humanTokens(ProxyMetrics.cacheReadTokens),
+                    StatsFormat.humanTokens(ProxyMetrics.cacheWriteTokens)
                 ),
                 bold = true
             )
@@ -406,8 +406,32 @@ class MainActivity : AppCompatActivity() {
         footer?.text = "@ $tps tok/s"
     }
 
+    /** Hairline rule between table sections (header / TOTAL). */
+    private fun dividerRow(): android.widget.TableRow {
+        val row = android.widget.TableRow(this)
+        val d = resources.displayMetrics.density
+        val v = View(this)
+        val lp = android.widget.TableRow.LayoutParams(
+            android.widget.TableRow.LayoutParams.MATCH_PARENT,
+            (1 * d).coerceAtLeast(1f).toInt()
+        )
+        lp.span = 5
+        v.layoutParams = lp
+        v.setBackgroundColor(getColor(R.color.outline))
+        val wrap = android.widget.TableRow.LayoutParams(
+            android.widget.TableRow.LayoutParams.MATCH_PARENT,
+            android.widget.TableRow.LayoutParams.WRAP_CONTENT
+        )
+        row.layoutParams = wrap
+        row.setPadding(0, (3 * d).toInt(), 0, (3 * d).toInt())
+        row.addView(v)
+        return row
+    }
+
     private fun tableRow(cells: List<String>, header: Boolean = false, bold: Boolean = false, violet: Int = 0): android.widget.TableRow {
         val row = android.widget.TableRow(this)
+        val d = resources.displayMetrics.density
+        val vPad = (6 * d).toInt()
         cells.forEachIndexed { i, text ->
             val tv = TextView(this)
             tv.text = text
@@ -416,7 +440,7 @@ class MainActivity : AppCompatActivity() {
             if (header || bold) tv.setTypeface(tv.typeface, android.graphics.Typeface.BOLD)
             if (header && violet != 0) tv.setTextColor(violet)
             tv.gravity = if (i == 0) android.view.Gravity.START else android.view.Gravity.END
-            tv.setPadding(0, 2, if (i == 0) 8 else 4, 2)
+            tv.setPadding(0, vPad, ((if (i == 0) 12 else 6) * d).toInt(), vPad)
             tv.ellipsize = android.text.TextUtils.TruncateAt.END
             tv.maxLines = 1
             row.addView(tv)
