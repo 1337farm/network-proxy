@@ -34,8 +34,16 @@ class ProxyService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.forgerig.gatekeeper.proxy.STOP"
+        const val EXTRA_ONLY_IF_STOPPED = "onlyIfStopped"
         private const val MAX_BODY_BYTES = 32 * 1024 * 1024L
         private const val POOL_SIZE = 32
+        /** Health self-ping cadence + consecutive failures before self-restart. */
+        const val HEALTH_INTERVAL_SEC = 30L
+        const val HEALTH_MAX_FAILS = 3
+
+        /** Pure restart decision (unit-tested). */
+        fun healthNeedsRestart(failStreak: Int, maxFails: Int = HEALTH_MAX_FAILS): Boolean =
+            failStreak >= maxFails
     }
 
     inner class LocalBinder : Binder() {
@@ -45,12 +53,17 @@ class ProxyService : Service() {
     private val binder = LocalBinder()
     private val running = AtomicInteger(0)
     @Volatile private var lastError: String? = null
-    private var port = 8080
+    private var port = 3128
     private var metricsEnabled = true
-    private var mitmEnabled = false
+    private var mitmEnabled = true
     private var client: OkHttpClient? = null
     private var serverThread: Thread? = null
     private var pool = Executors.newFixedThreadPool(POOL_SIZE)
+    // Health self-ping: proves the listener accepts connections; restarts
+    // the listener (not the process) after consecutive failures.
+    private var healthExec: java.util.concurrent.ScheduledExecutorService? = null
+    private val healthFails = AtomicInteger(0)
+    @Volatile private var lastHealthOkMs: Long = 0L
     private var statsCallback: ((Int, Long, Int, Int) -> Unit)? = null
     private var stateCallback: ((Boolean, String?) -> Unit)? = null
 
@@ -91,15 +104,22 @@ class ProxyService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        port = intent?.getIntExtra("port", 8080) ?: 8080
+        port = intent?.getIntExtra("port", 3128) ?: 3128
         metricsEnabled = intent?.getBooleanExtra("metricsEnabled", true) ?: true
-        mitmEnabled = intent?.getBooleanExtra("mitmEnabled", false) ?: false
+        mitmEnabled = intent?.getBooleanExtra("mitmEnabled", true) ?: true
 
         if (running.get() == 1) {
+            if (intent?.getBooleanExtra(EXTRA_ONLY_IF_STOPPED, false) == true) {
+                // Ensure-running ping (app start): already up, don't flap.
+                updateNotification("Proxy running on 0.0.0.0:$port", true)
+                stateCallback?.invoke(true, null)
+                return START_STICKY
+            }
             ProxyMetrics.event("Restart requested on :$port — draining old listener")
             stopProxy()
         }
         lastError = null
+        if (mitmEnabled) MitmCa.ensureLoaded(this)
         ProxyMetrics.event("Starting proxy on 0.0.0.0:$port")
         startProxy(port)
         return START_STICKY
@@ -144,8 +164,10 @@ class ProxyService : Service() {
                 return@Thread
             }
             running.set(1)
+            lastHealthOkMs = System.currentTimeMillis()
             updateNotification("Proxy running on 0.0.0.0:$port", true)
             stateCallback?.invoke(true, null)
+            scheduleHealth()
             while (running.get() == 1) {
                 try {
                     val socket = serverSocket.accept()
@@ -774,8 +796,61 @@ class ProxyService : Service() {
         wakeLock = null
     }
 
-    private fun stopProxy() {
+    /** "ok (12s ago)" / "degraded (2/3)" for the stats card. */
+    fun healthStatus(): String {
+        val fails = healthFails.get()
+        if (running.get() != 1) return "stopped"
+        if (fails == 0) {
+            val ago = (System.currentTimeMillis() - lastHealthOkMs) / 1000
+            return "ok (${ago}s ago)"
+        }
+        return "degraded ($fails/$HEALTH_MAX_FAILS)"
+    }
+
+    /** Start the periodic self-ping (idempotent across restarts). */
+    @Synchronized
+    private fun scheduleHealth() {
+        if (healthExec != null) return
+        val exec = Executors.newSingleThreadScheduledExecutor()
+        healthExec = exec
+        exec.scheduleAtFixedRate(
+            { healthPing() },
+            HEALTH_INTERVAL_SEC, HEALTH_INTERVAL_SEC, TimeUnit.SECONDS
+        )
+    }
+
+    /** One self-ping: bare TCP connect proves the listener accepts work. */
+    private fun healthPing() {
+        if (running.get() != 1) return
+        try {
+            Socket().use { s ->
+                s.connect(InetSocketAddress("127.0.0.1", port), 5_000)
+            }
+            healthFails.set(0)
+            lastHealthOkMs = System.currentTimeMillis()
+        } catch (e: Exception) {
+            val fails = healthFails.incrementAndGet()
+            ProxyMetrics.eventWarning("Health ping failed ($fails/$HEALTH_MAX_FAILS): ${e.message}")
+            if (healthNeedsRestart(fails)) {
+                ProxyMetrics.eventWarning("Health: listener dead — self-restarting on :$port")
+                healthFails.set(0)
+                try {
+                    stopProxy(cancelHealth = false)
+                } catch (_: Exception) {}
+                startProxy(port)
+            }
+        }
+    }
+
+    private fun stopProxy(cancelHealth: Boolean = true) {
         running.set(0)
+        if (cancelHealth) {
+            try {
+                healthExec?.shutdownNow()
+            } catch (_: Exception) {}
+            healthExec = null
+            healthFails.set(0)
+        }
         serverThread?.interrupt()
         pool.shutdownNow()
         try {
