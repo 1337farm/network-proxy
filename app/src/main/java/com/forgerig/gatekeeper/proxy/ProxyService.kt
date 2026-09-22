@@ -601,8 +601,12 @@ class ProxyService : Service() {
             val downBytes = java.util.concurrent.atomic.AtomicLong(0)
             val tap = java.io.ByteArrayOutputStream()
             val tapCap = 512 * 1024
+            // Live usage scan: tokens count per chunk as they stream (the
+            // close-time scan below only covers encoded bodies the live
+            // scanner can't read — see scanTapBytesForClose).
+            val liveUsage = ProxyMetrics.StreamingUsage()
             val t1 = Thread { relayTap(cIn, uOut, upBytes, null, 0) }
-            val t2 = Thread { relayTap(uIn, cOut, downBytes, tap, tapCap) }
+            val t2 = Thread { relayTap(uIn, cOut, downBytes, tap, tapCap, liveUsage, host) }
             t1.start(); t2.start()
             t1.join(); t2.join()
             // NOTE: bytesOut is fed per-chunk inside relay()/relayTap();
@@ -612,14 +616,27 @@ class ProxyService : Service() {
                 requestId, upBytes.get() + downBytes.get(), NetworkScenario.SUCCESS
             )
             if (tap.size() > 0) {
-                val found = ProxyMetrics.scanUsage(tap.toString("UTF-8"))
+                // Plaintext was already counted live per chunk; this only
+                // picks up gzip/deflate bodies. Never recount plaintext.
+                val found = ProxyMetrics.scanTapBytesForClose(tap.toByteArray())
                 if (found[0] + found[1] + found[2] + found[3] > 0) {
                     ProxyMetrics.addTokens(found[0], found[1], found[2], found[3])
                     ProxyMetrics.event(
                         "Tokens $host in=${found[0]} out=${found[1]} " +
-                            "cacheR=${found[2]} cacheW=${found[3]} (mitm)"
+                            "cacheR=${found[2]} cacheW=${found[3]} (mitm encoded)"
                     )
                 }
+            }
+            // Flush a trailing match deferred at the exact end of the last
+            // chunk (digit run of unknown completeness). Disjoint from both
+            // live counts and the encoded-body fallback above.
+            val tail = liveUsage.flush()
+            if (tail[0] + tail[1] + tail[2] + tail[3] > 0) {
+                ProxyMetrics.addTokens(tail[0], tail[1], tail[2], tail[3])
+                ProxyMetrics.event(
+                    "Tokens $host in=${tail[0]} out=${tail[1]} " +
+                        "cacheR=${tail[2]} cacheW=${tail[3]} (live tail)"
+                )
             }
             val ms = System.currentTimeMillis() - startedAt
             ProxyMetrics.event(
@@ -636,13 +653,16 @@ class ProxyService : Service() {
         }
     }
 
-    /** Copy with byte counter + optional plaintext tap (capped). */
+    /** Copy with byte counter + optional plaintext tap (capped) + optional
+     *  live usage scan (downstream direction only — pass null upstream). */
     private fun relayTap(
         input: java.io.InputStream,
         output: java.io.OutputStream,
         counter: java.util.concurrent.atomic.AtomicLong,
         tap: java.io.ByteArrayOutputStream?,
-        tapCap: Int
+        tapCap: Int,
+        liveUsage: ProxyMetrics.StreamingUsage? = null,
+        usageHost: String = ""
     ) {
         try {
             val buf = ByteArray(64 * 1024)
@@ -655,6 +675,16 @@ class ProxyService : Service() {
                 counter.addAndGet(n.toLong())
                 if (tap != null && tap.size() < tapCap) {
                     tap.write(buf, 0, n.coerceAtMost(tapCap - tap.size()))
+                }
+                if (liveUsage != null) {
+                    val found = liveUsage.feed(buf, n)
+                    if (found[0] + found[1] + found[2] + found[3] > 0) {
+                        ProxyMetrics.addTokens(found[0], found[1], found[2], found[3])
+                        ProxyMetrics.event(
+                            "Tokens $usageHost in=${found[0]} out=${found[1]} " +
+                                "cacheR=${found[2]} cacheW=${found[3]} (live)"
+                        )
+                    }
                 }
             }
         } catch (_: Exception) {

@@ -3,12 +3,15 @@ package com.forgerig.gatekeeper.proxy
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.zip.GZIPInputStream
+import java.util.zip.InflaterInputStream
 
 data class MetricsSnapshot(
     val sessions: List<SessionMetrics> = emptyList(),
@@ -410,6 +413,34 @@ object ProxyMetrics {
         outputTokens += output
         cacheReadTokens += cacheRead
         cacheWriteTokens += cacheWrite
+        if (output > 0) {
+            val now = System.currentTimeMillis()
+            tokenEventTimes.add(now to output)
+            pruneTokenEvents(now)
+        }
+    }
+
+    // ---- Output tokens/sec (trailing window over completion tokens) ----
+    private val tokenEventTimes = ConcurrentLinkedQueue<Pair<Long, Long>>()
+    private const val TPS_WINDOW_MS = 30_000L
+
+    private fun pruneTokenEvents(now: Long, windowMs: Long = TPS_WINDOW_MS) {
+        while (true) {
+            val head = tokenEventTimes.peek() ?: break
+            if (now - head.first <= windowMs) break
+            tokenEventTimes.poll()
+        }
+    }
+
+    /** Output tokens per second over the trailing window (default 30s). */
+    @Synchronized
+    fun outputTokensPerSecond(windowMs: Long = TPS_WINDOW_MS): Double {
+        if (windowMs <= 0) return 0.0
+        val now = System.currentTimeMillis()
+        pruneTokenEvents(now, windowMs)
+        var sum = 0L
+        for ((_, n) in tokenEventTimes) sum += n
+        return sum.toDouble() / (windowMs / 1000.0)
     }
 
     fun hostSummary(top: Int = 5): List<Triple<String, Long, Long>> =
@@ -422,6 +453,7 @@ object ProxyMetrics {
         outputTokens = 0
         cacheReadTokens = 0
         cacheWriteTokens = 0
+        tokenEventTimes.clear()
     }
 
     // usage-block scanner: finds Anthropic + OpenAI token fields in a
@@ -441,5 +473,179 @@ object ProxyMetrics {
         // prompt_tokens INCLUDES cached tokens on OpenAI; keep raw sums.
         val oaiCached = tokNum("cached_tokens", body)
         return longArrayOf(anthIn + oaiIn, anthOut + oaiOut, cacheRead + oaiCached, cacheWrite)
+    }
+
+    /**
+     * Incremental usage scanner for live MITM downstream bytes.
+     *
+     * The old code scanned the tap once at tunnel close — but upstream
+     * keep-alive means close can lag the response by minutes (or never
+     * happen while the client reuses the connection), so the UI sat at
+     * zero. This counts usage fields per chunk as they stream, keeping a
+     * short carry so a field split across a chunk boundary is counted
+     * exactly once (matches fully inside the carry region were already
+     * counted by an earlier feed and are skipped).
+     *
+     * Digit runs need care: `\d+` also matches a PREFIX of a number still
+     * arriving (`"prompt_tokens":78` of `7843`), which would then count
+     * twice. A match ending at the very end of the buffer is therefore
+     * deferred (remembered as [pendingText]) and resolved on the next
+     * feed — or via [flush] at stream end.
+     */
+    class StreamingUsage {
+        // Carry is decoded CHARS (not bytes) so every index below is exact;
+        // a multi-byte char split across a chunk boundary degrades to
+        // U+FFFD noise on both sides, which never sits inside an ASCII
+        // `"key":digits` span and so can't break matching.
+        private var carryText = ""
+        private val carryMax = 160
+        private var pendingText: String? = null
+        private val patterns = listOf(
+            "input_tokens", "output_tokens",
+            "cache_read_input_tokens", "cache_creation_input_tokens",
+            "prompt_tokens", "completion_tokens", "cached_tokens"
+        ).map { key -> key to Regex(""""$key"\s*:\s*(\d+)(?!\d)""") }
+        private val keyValue = Regex(""""(\w+)"\s*:\s*(\d+)$""")
+
+        fun feed(chunk: ByteArray, len: Int): LongArray {
+            val out = LongArray(4)
+            if (len <= 0) return out
+            val text = carryText + chunk.copyOf(len).toString(Charsets.UTF_8)
+            val carryChars = carryText.length
+            // Resolve the previous deferred match, which ends exactly where
+            // the new bytes begin. If the digit run continued, the extended
+            // match below counts it; otherwise it was complete — count now.
+            pendingText?.let { p ->
+                val at = carryChars - p.length
+                if (at >= 0 && text.regionMatches(at, p, 0, p.length) &&
+                    at + p.length == carryChars
+                ) {
+                    if (!text[carryChars].isDigit()) addMatch(out, p)
+                } else {
+                    // Misaligned (shouldn't happen): locate the deferred
+                    // span in already-seen bytes and count it iff its run
+                    // provably ended there.
+                    val found = text.lastIndexOf(p, (carryChars - 1).coerceAtLeast(0))
+                    if (found >= 0 && found + p.length <= carryChars &&
+                        (found + p.length >= text.length || !text[found + p.length].isDigit())
+                    ) addMatch(out, p)
+                }
+                pendingText = null
+            }
+            for ((_, re) in patterns) {
+                for (m in re.findAll(text)) {
+                    if (m.range.last == text.length - 1) {
+                        // Ends at the buffer edge: possibly a partial digit
+                        // run — defer to the next feed / flush.
+                        pendingText = m.value
+                    } else if (m.range.last >= carryChars) {
+                        addMatch(out, m.value)
+                    }
+                }
+            }
+            carryText = text.takeLast(minOf(carryMax, text.length))
+            return out
+        }
+
+        /** Count a deferred trailing match at stream end. Idempotent. */
+        fun flush(): LongArray {
+            val out = LongArray(4)
+            pendingText?.let { addMatch(out, it) }
+            pendingText = null
+            return out
+        }
+
+        private fun addMatch(out: LongArray, matchText: String) {
+            val m = keyValue.find(matchText) ?: return
+            val value = m.groupValues[2].toLongOrNull() ?: return
+            when (m.groupValues[1]) {
+                "input_tokens", "prompt_tokens" -> out[0] += value
+                "output_tokens", "completion_tokens" -> out[1] += value
+                "cache_read_input_tokens", "cached_tokens" -> out[2] += value
+                "cache_creation_input_tokens" -> out[3] += value
+            }
+        }
+    }
+
+    /**
+     * Close-of-tunnel fallback for the MITM tap. Live [StreamingUsage]
+     * already counted every plaintext byte as it streamed, so a plaintext
+     * tap returns zeros here (recounting would double). Encoded bodies
+     * (gzip/deflate — opaque to the live scanner) are de-chunked,
+     * inflated and scanned instead.
+     */
+    fun scanTapBytesForClose(raw: ByteArray): LongArray {
+        if (raw.isEmpty()) return LongArray(4)
+        val headEnd = indexOfHeaderEnd(raw)
+        val headLen = if (headEnd in 1..32768) headEnd else minOf(raw.size, 32768)
+        val head = raw.copyOf(headLen).toString(Charsets.UTF_8)
+        val enc = Regex("""(?i)content-encoding\s*:\s*([^\r\n]+)""")
+            .find(head)?.groupValues?.get(1) ?: ""
+        val gzipped = enc.contains("gzip", ignoreCase = true)
+        val deflated = enc.contains("deflate", ignoreCase = true)
+        if (!gzipped && !deflated) return LongArray(4)
+        val body = if (headEnd > 0) raw.copyOfRange(headEnd, raw.size) else raw
+        val plain = tryDecodeBody(body, gzipped) ?: return LongArray(4)
+        return scanUsage(plain)
+    }
+
+    private fun indexOfHeaderEnd(raw: ByteArray): Int {
+        var i = 0
+        while (i + 3 < raw.size) {
+            if (raw[i] == '\r'.code.toByte() && raw[i + 1] == '\n'.code.toByte() &&
+                raw[i + 2] == '\r'.code.toByte() && raw[i + 3] == '\n'.code.toByte()
+            ) return i + 4
+            i++
+        }
+        return -1
+    }
+
+    private fun tryDecodeBody(body: ByteArray, gzipped: Boolean): String? {
+        // Bodies are usually chunk-framed; strip framing first (best effort).
+        val framed = tryDechunk(body) ?: body
+        return try {
+            val stream = if (gzipped) GZIPInputStream(framed.inputStream())
+            else InflaterInputStream(framed.inputStream())
+            stream.readBytes().toString(Charsets.UTF_8).takeIf { it.contains("{") }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Best-effort HTTP/1.1 chunked decoder. Null when not chunk-framed. */
+    fun tryDechunk(body: ByteArray): ByteArray? {
+        val out = ByteArrayOutputStream()
+        var i = 0
+        var chunks = 0
+        fun readLine(): String? {
+            var j = i
+            while (j + 1 < body.size &&
+                !(body[j] == '\r'.code.toByte() && body[j + 1] == '\n'.code.toByte())
+            ) j++
+            if (j + 1 >= body.size) return null
+            val line = body.copyOfRange(i, j).toString(Charsets.UTF_8)
+            i = j + 2
+            return line
+        }
+        while (i < body.size) {
+            val line = readLine() ?: break
+            val size = line.trim().substringBefore(";").toLongOrNull(16)
+                ?: return if (chunks > 0) out.toByteArray() else null
+            if (size == 0L) {
+                // Skip trailers, then continue (pipelined responses); the
+                // next head line won't parse as hex and ends decoding.
+                while (true) {
+                    val t = readLine() ?: break
+                    if (t.isEmpty()) break
+                }
+                continue
+            }
+            if (size > 64 * 1024 * 1024) return null
+            if (i + size + 2 > body.size) return if (chunks > 0) out.toByteArray() else null
+            out.write(body, i, size.toInt())
+            i += size.toInt() + 2 // skip data + trailing CRLF
+            chunks++
+        }
+        return if (chunks > 0) out.toByteArray() else null
     }
 }
