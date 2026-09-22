@@ -62,26 +62,74 @@ object MitmCa {
                 val keyBytes = keyF.readBytes()
                 val spec = java.security.spec.PKCS8EncodedKeySpec(keyBytes)
                 caKey = java.security.KeyFactory.getInstance("RSA").generatePrivate(spec)
+                // Self-check: a CA whose subject DN can't round-trip as a
+                // leaf issuer (e.g. pre-RFC4514-ordering CAs) fails closed
+                // here instead of issuing unverifiable leafs at runtime.
+                if (!selfIssues(context, "mitm-selfcheck.invalid")) {
+                    ProxyMetrics.eventWarning("MITM CA subject order stale - regenerating CA")
+                    leafContexts.clear()
+                    issueFreshCa(dir, certF, keyF)
+                }
             } else {
-                val kp = genRsa()
-                val now = System.currentTimeMillis()
-                val holder = JcaX509v3CertificateBuilder(
-                    X500Name("CN=NetworkProxy Local CA,O=1337farm,C=US"),
-                    BigInteger(64, SecureRandom()),
-                    Date(now - 60_000), Date(now + 10L * 365 * 86400_000),
-                    X500Name("CN=NetworkProxy Local CA,O=1337farm,C=US"),
-                    kp.public
-                ).addExtension(Extension.basicConstraints, true, BasicConstraints(true))
-                    .build(JcaContentSignerBuilder("SHA256withRSA").build(kp.private))
-                caCert = JcaX509CertificateConverter().getCertificate(holder)
-                caKey = kp.private
-                certF.writeBytes(pemEncode("CERTIFICATE", holder.encoded).toByteArray())
-                keyF.writeBytes(kp.private.encoded)
+                issueFreshCa(dir, certF, keyF)
             }
             ProxyMetrics.event("MITM CA ready (${caCertFile(context).name})")
             true
         } catch (e: Exception) {
             ProxyMetrics.eventError("MITM CA init failed: ${e.message}", e)
+            false
+        }
+    }
+
+    /**
+     * Canonical CA subject, RFC 4514 order (most-significant first):
+     * C, O, CN. BouncyCastle's X500Name(string) keeps declaration order,
+     * so the literal order here IS the DER order. The leaf issuer MUST be
+     * byte-identical to this or clients fail with "unable to get local
+     * issuer certificate" (see serverContext - it reuses this constant).
+     */
+    private const val CA_SUBJECT = "C=US,O=1337farm,CN=NetworkProxy Local CA"
+
+    private fun issueFreshCa(dir: File, certF: File, keyF: File) {
+        val kp = genRsa()
+        val now = System.currentTimeMillis()
+        val holder = JcaX509v3CertificateBuilder(
+            X500Name(CA_SUBJECT),
+            BigInteger(64, SecureRandom()),
+            Date(now - 60_000), Date(now + 10L * 365 * 86400_000),
+            X500Name(CA_SUBJECT),
+            kp.public
+        ).addExtension(Extension.basicConstraints, true, BasicConstraints(true))
+            .build(JcaContentSignerBuilder("SHA256withRSA").build(kp.private))
+        caCert = JcaX509CertificateConverter().getCertificate(holder)
+        caKey = kp.private
+        certF.writeBytes(pemEncode("CERTIFICATE", holder.encoded).toByteArray())
+        keyF.writeBytes(kp.private.encoded)
+    }
+
+    /**
+     * Can this CA issue a leaf for [host] whose issuer verifies against
+     * the CA cert? Issues a throwaway leaf and checks signature + DN
+     * equality. Runs at load so a stale on-device CA regenerates once
+     * instead of failing every CONNECT at runtime.
+     */
+    private fun selfIssues(context: Context, host: String): Boolean {
+        return try {
+            val key = caKey ?: return false
+            val ca = caCert ?: return false
+            val kp = genRsa()
+            val now = System.currentTimeMillis()
+            val holder: X509CertificateHolder = JcaX509v3CertificateBuilder(
+                X500Name.getInstance(org.bouncycastle.asn1.ASN1Sequence.getInstance(ca.subjectX500Principal.encoded)),
+                BigInteger(64, SecureRandom()),
+                Date(now - 60_000), Date(now + 60_000),
+                X500Name("CN=$host"),
+                kp.public
+            ).build(JcaContentSignerBuilder("SHA256withRSA").build(key))
+            val leaf = JcaX509CertificateConverter().getCertificate(holder)
+            leaf.verify(ca.publicKey)
+            leaf.issuerX500Principal == ca.subjectX500Principal
+        } catch (_: Exception) {
             false
         }
     }
@@ -104,8 +152,13 @@ object MitmCa {
             val ca = caCert ?: return null
             val kp = genRsa()
             val now = System.currentTimeMillis()
+            // Issuer MUST be byte-identical to the CA subject: reuse the
+            // CA cert's own encoded subject (X500Principal.getName gives
+            // RFC 1779 order, which BouncyCastle would re-encode in a
+            // different RDN order - unverifiable leafs, "unable to get
+            // local issuer certificate" on every client).
             val holder: X509CertificateHolder = JcaX509v3CertificateBuilder(
-                X500Name(ca.subjectDN.name),
+                X500Name.getInstance(org.bouncycastle.asn1.ASN1Sequence.getInstance(ca.subjectX500Principal.encoded)),
                 BigInteger(64, SecureRandom()),
                 Date(now - 60_000), Date(now + 825L * 86400_000),
                 X500Name("CN=$host"),
