@@ -19,6 +19,14 @@ import com.google.android.material.checkbox.MaterialCheckBox
 import com.google.android.material.textfield.TextInputEditText
 class MainActivity : AppCompatActivity() {
 
+    companion object {
+        private const val PREFS = "gatekeeper"
+        private const val KEY_SHOULD_RUN = "proxyShouldRun"
+        private const val KEY_MITM = "mitmChecked"
+    }
+
+    private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
     private lateinit var viewModel: ProxyViewModel
     private var setupScriptExpanded = false
     private val statsHandler = Handler(Looper.getMainLooper())
@@ -52,6 +60,18 @@ class MainActivity : AppCompatActivity() {
         val portInput = findViewById<TextInputEditText>(R.id.portInput)
         val metricsCheck = findViewById<MaterialCheckBox>(R.id.metricsCheck)
         val mitmCheck = findViewById<MaterialCheckBox>(R.id.mitmCheck)
+        // Decrypt-HTTPS auto-enables when the CA is ready; the toggle
+        // remains as an explicit opt-out.
+        if (MitmCa.caPem(this) != null && !prefs().contains(KEY_MITM)) {
+            mitmCheck.isChecked = true
+        }
+
+        // Auto-start: ensure the proxy is running on app start unless the
+        // user explicitly stopped it (Stop persists the opt-out).
+        if (savedInstanceState == null && prefs().getBoolean(KEY_SHOULD_RUN, true)) {
+            val p = portInput.text.toString().toIntOrNull() ?: 3128
+            viewModel.ensureRunning(p, metricsCheck.isChecked, mitmCheck.isChecked)
+        }
 
         val refreshScript = {
             val p = portInput.text.toString().toIntOrNull() ?: 3128
@@ -97,17 +117,20 @@ class MainActivity : AppCompatActivity() {
         }
 
         startStopButton.setOnClickListener {
-            val port = portInput.text.toString().toIntOrNull() ?: 8080
+            val port = portInput.text.toString().toIntOrNull() ?: 3128
             val metricsEnabled = metricsCheck.isChecked
             val mitmEnabled = mitmCheck.isChecked
+            prefs().edit().putBoolean(KEY_MITM, mitmEnabled).apply()
 
             if (viewModel.isRunning.value == true) {
+                prefs().edit().putBoolean(KEY_SHOULD_RUN, false).apply()
                 viewModel.stopProxy()
             } else {
+                prefs().edit().putBoolean(KEY_SHOULD_RUN, true).apply()
                 if (mitmEnabled && MitmCa.caPem(this) == null) {
                     Toast.makeText(
                         this,
-                        "MITM CA unavailable — starting opaque (install CA via Export below)",
+                        "MITM CA unavailable — starting opaque",
                         Toast.LENGTH_LONG
                     ).show()
                 }
@@ -323,7 +346,8 @@ class MainActivity : AppCompatActivity() {
         val retries = snap.retryCounts.values.sum()
         findViewById<TextView>(R.id.requestsText)?.text = "Requests: $requests"
         findViewById<TextView>(R.id.bytesText)?.text = "Transferred: ${humanBytes(bytes)}"
-        findViewById<TextView>(R.id.sessionsText)?.text = "Active Sessions: $active"
+        findViewById<TextView>(R.id.sessionsText)?.text =
+            "Active Sessions: $active • health ${svc?.healthStatus() ?: "stopped"}"
         findViewById<TextView>(R.id.retriesText)?.text =
             if (snap.scenarioCounts.isEmpty()) "Retries: $retries"
             else "Retries: $retries (${snap.scenarioCounts.entries.joinToString { "${it.key}=${it.value}" }})"
@@ -341,28 +365,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Aligned per-host token table + totals (tokensText is monospace). */
+    /** Fixed-width per-host token table (see StatsFormat: cells are
+     *  humanized to constant width so columns can't drift). */
     private fun tokenTable(): String {
         val rows = ProxyMetrics.tokenSummary(5)
-        val tps = String.format(java.util.Locale.US, "%.1f", ProxyMetrics.outputTokensPerSecond())
-        if (rows.isEmpty()) return "Tokens: in 0 / out 0 @ $tps tok/s"
-        val sb = StringBuilder()
-        sb.append(String.format(
-            java.util.Locale.US, "%-18s %7s %7s %7s %7s",
-            "host", "in", "out", "cacheR", "cacheW"
-        ))
-        for (r in rows) {
-            sb.append("\n").append(String.format(
-                java.util.Locale.US, "%-18s %7d %7d %7d %7d",
-                r.host.take(18), r.inTokens, r.outTokens, r.cacheRead, r.cacheWrite
-            ))
-        }
-        sb.append("\n").append(String.format(
-            java.util.Locale.US, "%-18s %7d %7d %7d %7d  @ %s tok/s",
-            "TOTAL", ProxyMetrics.inputTokens, ProxyMetrics.outputTokens,
-            ProxyMetrics.cacheReadTokens, ProxyMetrics.cacheWriteTokens, tps
-        ))
-        return sb.toString()
+        return StatsFormat.tokenTable(
+            rows,
+            StatsFormat.Totals(
+                ProxyMetrics.inputTokens, ProxyMetrics.outputTokens,
+                ProxyMetrics.cacheReadTokens, ProxyMetrics.cacheWriteTokens
+            ),
+            ProxyMetrics.outputTokensPerSecond()
+        )
     }
 
     private fun humanBytes(bytes: Long): String {

@@ -204,7 +204,7 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
                         android:text="@string/mitm_enabled"
-                        android:checked="false"/>
+                        android:checked="true"/>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
