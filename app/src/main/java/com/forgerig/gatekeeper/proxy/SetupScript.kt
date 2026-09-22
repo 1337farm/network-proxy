@@ -151,9 +151,11 @@ object SetupScript {
             |        'export https_proxy="http://127.0.0.1:' + port + '"',
             |        'export no_proxy="localhost,127.0.0.1,::1"',
             |        ca_begin,
-            |        'export SSL_CERT_FILE="${"$"}HOME/.config/network-proxy/bundle.pem"',
-            |        'export REQUESTS_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"',
-            |        'export NODE_EXTRA_CA_CERTS="${"$"}HOME/.config/network-proxy/ca.pem"',
+             |        'export SSL_CERT_FILE="${"$"}HOME/.config/network-proxy/bundle.pem"',
+             |        'export REQUESTS_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"',
+             |        'export NODE_EXTRA_CA_CERTS="${"$"}HOME/.config/network-proxy/ca.pem"',
+             |        'export CURL_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"',
+             |        'export GIT_SSL_CAINFO="${"$"}HOME/.config/network-proxy/bundle.pem"',
             |        ca_end,
             |        "# <<< network-proxy (managed) <<<",
             |    ]) + "\n"
@@ -224,9 +226,11 @@ object SetupScript {
              |  done
              |  if [[ -n "${"$"}SYS_BUNDLE" ]]; then
              |    cat "${"$"}SYS_BUNDLE" "${"$"}HOME/.config/network-proxy/ca.pem" > "${"$"}HOME/.config/network-proxy/bundle.pem"
-             |    export SSL_CERT_FILE="${"$"}HOME/.config/network-proxy/bundle.pem"
-             |    export REQUESTS_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"
-             |    export NODE_EXTRA_CA_CERTS="${"$"}HOME/.config/network-proxy/ca.pem"
+              |    export SSL_CERT_FILE="${"$"}HOME/.config/network-proxy/bundle.pem"
+              |    export REQUESTS_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"
+              |    export NODE_EXTRA_CA_CERTS="${"$"}HOME/.config/network-proxy/ca.pem"
+              |    export CURL_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"
+              |    export GIT_SSL_CAINFO="${"$"}HOME/.config/network-proxy/bundle.pem"
              |  fi
              |  if [[ -d /usr/local/share/ca-certificates ]]; then
              |    cp "${"$"}HOME/.config/network-proxy/ca.pem" /usr/local/share/ca-certificates/network-proxy-ca.crt 2>/dev/null || true
