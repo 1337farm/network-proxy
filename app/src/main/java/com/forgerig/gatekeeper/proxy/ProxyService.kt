@@ -434,7 +434,7 @@ class ProxyService : Service() {
                             if (it.size() > 0) {
                                 val found = ProxyMetrics.scanUsage(it.toString("UTF-8"))
                                 if (found[0] + found[1] + found[2] + found[3] > 0) {
-                                    ProxyMetrics.addTokens(found[0], found[1], found[2], found[3])
+                                    ProxyMetrics.addTokens(found[0], found[1], found[2], found[3], host)
                                     ProxyMetrics.event(
                                         "Tokens $host in=${found[0]} out=${found[1]} " +
                                             "cacheR=${found[2]} cacheW=${found[3]}"
@@ -620,7 +620,7 @@ class ProxyService : Service() {
                 // picks up gzip/deflate bodies. Never recount plaintext.
                 val found = ProxyMetrics.scanTapBytesForClose(tap.toByteArray())
                 if (found[0] + found[1] + found[2] + found[3] > 0) {
-                    ProxyMetrics.addTokens(found[0], found[1], found[2], found[3])
+                    ProxyMetrics.addTokens(found[0], found[1], found[2], found[3], host)
                     ProxyMetrics.event(
                         "Tokens $host in=${found[0]} out=${found[1]} " +
                             "cacheR=${found[2]} cacheW=${found[3]} (mitm encoded)"
@@ -632,7 +632,7 @@ class ProxyService : Service() {
             // live counts and the encoded-body fallback above.
             val tail = liveUsage.flush()
             if (tail[0] + tail[1] + tail[2] + tail[3] > 0) {
-                ProxyMetrics.addTokens(tail[0], tail[1], tail[2], tail[3])
+                ProxyMetrics.addTokens(tail[0], tail[1], tail[2], tail[3], host)
                 ProxyMetrics.event(
                     "Tokens $host in=${tail[0]} out=${tail[1]} " +
                         "cacheR=${tail[2]} cacheW=${tail[3]} (live tail)"
@@ -679,7 +679,7 @@ class ProxyService : Service() {
                 if (liveUsage != null) {
                     val found = liveUsage.feed(buf, n)
                     if (found[0] + found[1] + found[2] + found[3] > 0) {
-                        ProxyMetrics.addTokens(found[0], found[1], found[2], found[3])
+                        ProxyMetrics.addTokens(found[0], found[1], found[2], found[3], usageHost)
                         ProxyMetrics.event(
                             "Tokens $usageHost in=${found[0]} out=${found[1]} " +
                                 "cacheR=${found[2]} cacheW=${found[3]} (live)"

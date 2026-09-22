@@ -408,11 +408,18 @@ object ProxyMetrics {
     }
 
     @Synchronized
-    fun addTokens(input: Long, output: Long, cacheRead: Long, cacheWrite: Long) {
+    fun addTokens(input: Long, output: Long, cacheRead: Long, cacheWrite: Long, host: String = "") {
         inputTokens += input
         outputTokens += output
         cacheReadTokens += cacheRead
         cacheWriteTokens += cacheWrite
+        if (host.isNotBlank()) {
+            val t = tokenTallies.getOrPut(host) { TokenTally() }
+            t.inTokens += input
+            t.outTokens += output
+            t.cacheRead += cacheRead
+            t.cacheWrite += cacheWrite
+        }
         if (output > 0) {
             val now = System.currentTimeMillis()
             tokenEventTimes.add(now to output)
@@ -447,12 +454,39 @@ object ProxyMetrics {
         hostTallies.entries.sortedByDescending { it.value.upBytes + it.value.downBytes }
             .take(top).map { Triple(it.key, it.value.upBytes, it.value.downBytes) }
 
+    // ---- Per-host token tallies (feeds the token table; globals above
+    // stay the totals row). Host is passed by every addTokens call site.
+    data class TokenTally(
+        var inTokens: Long = 0,
+        var outTokens: Long = 0,
+        var cacheRead: Long = 0,
+        var cacheWrite: Long = 0
+    ) {
+        fun total(): Long = inTokens + outTokens
+    }
+
+    private val tokenTallies = ConcurrentHashMap<String, TokenTally>()
+
+    data class TokenRow(
+        val host: String,
+        val inTokens: Long,
+        val outTokens: Long,
+        val cacheRead: Long,
+        val cacheWrite: Long
+    )
+
+    fun tokenSummary(top: Int = 5): List<TokenRow> =
+        tokenTallies.entries.sortedByDescending { it.value.total() }
+            .take(top)
+            .map { (h, t) -> TokenRow(h, t.inTokens, t.outTokens, t.cacheRead, t.cacheWrite) }
+
     fun resetTallies() {
         hostTallies.clear()
         inputTokens = 0
         outputTokens = 0
         cacheReadTokens = 0
         cacheWriteTokens = 0
+        tokenTallies.clear()
         tokenEventTimes.clear()
     }
 
