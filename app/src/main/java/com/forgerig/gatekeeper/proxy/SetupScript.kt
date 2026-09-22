@@ -28,7 +28,7 @@ object SetupScript {
     /** Setup script. Safe to paste multiple times: bashrc append is
      *  marker-guarded, the jsonc edit converges, the probe is read-only.
      *  NOTE: the emitted script must stay pure ASCII (no em-dashes, no
-     *  smart quotes, no arrows) — proot/Termux locales mangle multibyte
+     *  smart quotes, no arrows) - proot/Termux locales mangle multibyte
      *  chars on paste and corrupt the paste. [scriptFor] is the pure,
      *  unit-tested core; [build] keeps the Context signature for callers. */
     fun build(context: Context, port: Int): String = scriptFor(port)
@@ -51,15 +51,94 @@ object SetupScript {
             |# (present in default bashrc files) so the vars also apply to
             |# non-interactive shells that explicitly 'source ~/.bashrc'
             |# (e.g. tool/CI invocations, which never see lines below it).
+            |# The CA trust exports MUST live in this same above-guard block:
+            |# opencode serve is started non-interactively (opencode-start),
+            |# so a CA block below the guard never applies to it and MITM
+            |# fails with "self-signed certificate in certificate chain".
             |# The marker check keeps repeat runs from appending duplicates.
             |python3 - "${port}" ~/.bashrc <<'PYEOF'
             |import sys
             |port, rc = sys.argv[1], sys.argv[2]
             |begin = "# >>> network-proxy (managed) >>>"
+            |ca_begin = "# >>> network-proxy-ca (managed) >>>"
+            |ca_end = "# <<< network-proxy-ca (managed) <<<"
             |try:
             |    text = open(rc).read()
             |except FileNotFoundError:
             |    text = ""
+            |# Pass 1: strip any standalone CA block (a CA block whose begin
+            |# line is NOT inside the managed proxy block - i.e. the legacy
+            |# below-guard layout). The unified block nests the CA markers
+            |# INSIDE the proxy markers, so only strip when the CA begin
+            |# appears before any proxy begin.
+            |lines = text.splitlines(keepends=True)
+            |kept, skipping, stripped, in_proxy = [], False, 0, False
+            |for ln in lines:
+            |    if begin in ln:
+            |        in_proxy = True
+            |        kept.append(ln)
+            |        continue
+            |    if "# <<< network-proxy (managed) <<<" in ln:
+            |        in_proxy = False
+            |        kept.append(ln)
+            |        continue
+            |    if ca_begin in ln and not in_proxy:
+            |        skipping = True
+            |        stripped += 1
+            |        continue
+            |    if ca_end in ln and skipping:
+            |        skipping = False
+            |        stripped += 1
+            |        continue
+            |    if skipping:
+            |        stripped += 1
+            |        continue
+            |    kept.append(ln)
+            |text = "".join(kept)
+            |# Unified block present (proxy markers + nested CA markers):
+            |# converge, do not rewrite. Persist the stale-strip when it
+            |# removed something, then stop.
+            |if begin in text and ca_begin in text:
+            |    if stripped:
+            |        open(rc, "w").write(text)
+            |    print("bashrc: managed block already present (idempotent skip)")
+            |    raise SystemExit(0)
+            |if begin in text:
+            |    # Legacy proxy-only block (no nested CA exports): drop it so
+            |    # the rewrite below installs the unified block with CA trust
+            |    # above the guard (opencode serve needs it there).
+            |    lines2 = text.splitlines(keepends=True)
+            |    kept2, skipping2 = [], False
+            |    for ln in lines2:
+            |        if begin in ln:
+            |            skipping2 = True
+            |            stripped += 1
+            |            continue
+            |        if "# <<< network-proxy (managed) <<<" in ln:
+            |            skipping2 = False
+            |            stripped += 1
+            |            continue
+            |        if skipping2:
+            |            stripped += 1
+            |            continue
+            |        kept2.append(ln)
+            |    text = "".join(kept2)
+            |    lines2 = text.splitlines(keepends=True)
+            |    kept2, skipping2 = [], False
+            |    for ln in lines2:
+            |        if begin in ln:
+            |            skipping2 = True
+            |            stripped += 1
+            |            continue
+            |        if "# <<< network-proxy (managed) <<<" in ln:
+            |            skipping2 = False
+            |            stripped += 1
+            |            continue
+            |        if skipping2:
+            |            stripped += 1
+            |            continue
+            |        kept2.append(ln)
+            |    text = "".join(kept2)
             |if begin in text:
             |    print("bashrc: managed block already present (idempotent skip)")
             |else:
@@ -71,6 +150,11 @@ object SetupScript {
             |        'export http_proxy="http://127.0.0.1:' + port + '"',
             |        'export https_proxy="http://127.0.0.1:' + port + '"',
             |        'export no_proxy="localhost,127.0.0.1,::1"',
+            |        ca_begin,
+            |        'export SSL_CERT_FILE="${"$"}HOME/.config/network-proxy/bundle.pem"',
+            |        'export REQUESTS_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"',
+            |        'export NODE_EXTRA_CA_CERTS="${"$"}HOME/.config/network-proxy/ca.pem"',
+            |        ca_end,
             |        "# <<< network-proxy (managed) <<<",
             |    ]) + "\n"
             |    guard = '[ -z "${"$"}PS1" ] && return'
@@ -81,7 +165,7 @@ object SetupScript {
             |        text = text.rstrip("\n") + "\n" + block
             |        where = "appended"
             |    open(rc, "w").write(text)
-            |    print("bashrc: managed block " + where)
+            |    print("bashrc: managed block " + where + (" (stale CA block removed)" if stripped else ""))
             |PYEOF
             |# Tell opencode to absorb 429s itself (proxy also retries).
             |# Converges: re-running rewrites the same values, no duplication.
@@ -109,10 +193,13 @@ object SetupScript {
              |# Export step: \`curl http://127.0.0.1:${port}/ca.pem\` (works
              |# with or without proxy env, direct-to-port included). Falls
              |# back to a previously exported file when the proxy isn't up.
-             |# Trusted for this terminal: Ubuntu store (best effort),
-             |# Termux/Python/Node bundles, plus persistent exports.
-             |# Skips cleanly when absent (Decrypt OFF = opaque tunnels,
-             |# nothing breaks).
+            |# Trusted for this terminal: Ubuntu store (best effort),
+            |# Termux/Python/Node bundles, plus persistent exports (the bashrc
+            |# managed block above the PS1 guard - the only place
+            |# non-interactive shells like opencode serve will see).
+            |# Skips cleanly when absent (Decrypt OFF = opaque tunnels,
+            |# nothing breaks). After pasting: RESTART opencode serve so it
+            |# picks up the CA trust env (see note above).
              |CA_PEM=""
              |CA_TMP="${"$"}HOME/.config/network-proxy/ca.pem"
              |mkdir -p "${"$"}HOME/.config/network-proxy"
@@ -145,15 +232,10 @@ object SetupScript {
              |    cp "${"$"}HOME/.config/network-proxy/ca.pem" /usr/local/share/ca-certificates/network-proxy-ca.crt 2>/dev/null || true
              |    update-ca-certificates 2>/dev/null || true
              |  fi
-             |  if ! grep -q "network-proxy-ca" ~/.bashrc 2>/dev/null; then
-             |    cat >> ~/.bashrc <<'CAEOF'
-             |# >>> network-proxy-ca (managed) >>>
-             |export SSL_CERT_FILE="${"$"}HOME/.config/network-proxy/bundle.pem"
-             |export REQUESTS_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"
-             |export NODE_EXTRA_CA_CERTS="${"$"}HOME/.config/network-proxy/ca.pem"
-             |# <<< network-proxy-ca (managed) <<<
-             |CAEOF
-             |  fi
+             |  # NOTE: persistent CA exports are NOT appended here anymore -
+             |  # they already live in the above-guard managed block (bashrc
+             |  # step), which is the only place non-interactive shells
+             |  # (opencode serve via opencode-start) will ever see.
              |  echo "MITM CA trusted for this terminal (bundle rebuilt)"
              |else
              |  echo "MITM CA not found - HTTPS will be tunneled opaque (no MITM)"

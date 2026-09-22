@@ -49,4 +49,55 @@ class SetupScriptTest {
         assertTrue(script.contains("tunneled opaque (no MITM)"))
         assertEquals(1, script.lines().count { "MITM CA not found" in it })
     }
+
+    @Test
+    fun caTrustExportsLiveInAboveGuardBlock() {
+        // Regression: the CA trust exports were appended BELOW the PS1
+        // guard, so non-interactive shells (opencode serve via
+        // opencode-start) never saw them -> "self-signed certificate in
+        // certificate chain" on every MITM split. They must be part of
+        // the above-guard managed block the bashrc python step writes.
+        val script = rendered()
+        val bashrcStep = script.substringAfter("python3 - \"3128\" ~/.bashrc")
+        assertTrue(
+            "SSL_CERT_FILE must be in the above-guard block",
+            bashrcStep.contains("export SSL_CERT_FILE=")
+        )
+        assertTrue(
+            "REQUESTS_CA_BUNDLE must be in the above-guard block",
+            bashrcStep.contains("export REQUESTS_CA_BUNDLE=")
+        )
+        assertTrue(
+            "NODE_EXTRA_CA_CERTS must be in the above-guard block",
+            bashrcStep.contains("export NODE_EXTRA_CA_CERTS=")
+        )
+        // ...and must NOT be appended below the guard anymore.
+        val appendIdx = script.indexOf("cat >> ~/.bashrc")
+        assertTrue(
+            "no below-guard CA append may remain (opencode-start never sees it)",
+            appendIdx == -1 || !script.substring(appendIdx).contains("network-proxy-ca")
+        )
+    }
+
+    @Test
+    fun bashrcStepStripsStaleBelowGuardCaBlock() {
+        // Upgrades from the old layout leave a orphan CA block below the
+        // guard; the python step must remove it so trust lives in one
+        // place (above the guard).
+        val script = rendered()
+        assertTrue(
+            script.contains("network-proxy-ca (managed)")
+        )
+    }
+
+    @Test
+    fun bashrcStepConvergesWithoutRewrite() {
+        // The unified block (proxy + CA exports) must short-circuit with
+        // SystemExit(0): re-running must print the idempotent-skip line,
+        // never "above PS1 guard" again (that message means a rewrite).
+        val script = rendered()
+        val step = script.substringAfter("python3 - \"3128\" ~/.bashrc")
+        assertTrue(step.contains("idempotent skip"))
+        assertTrue(step.contains("raise SystemExit(0)"))
+    }
 }
