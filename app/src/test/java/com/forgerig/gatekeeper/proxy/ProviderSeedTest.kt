@@ -59,6 +59,22 @@ class ProviderSeedTest {
         assertTrue(store.providers.containsKey("custom-mine"))
     }
 
+    @Test
+    fun wellKnownExcludesGoogleAndPrunesKeylessGoogle() {
+        // Google offers no usable free LLM tier: never seeded, and a
+        // keyless leftover is pruned on load (keyed entries are kept —
+        // user data is never deleted).
+        assertTrue(ProviderStore.wellKnown().none { it.id == "google" })
+        val store = ProviderStore.blank()
+        ProviderStore.ensureWellKnown(store)
+        assert(!store.providers.containsKey("google"))
+        store.providers["google"] = ProviderStore.Provider(
+            "google", "https://generativelanguage.googleapis.com/v1beta"
+        )
+        ProviderStore.ensureWellKnown(store)
+        assert(!store.providers.containsKey("google"))
+    }
+
     // NOTE: fromJson() itself isn't unit-tested here — org.json is an
     // Android stub under plain JVM tests ("not mocked"). fromJson delegates
     // to ensureWellKnown, which the cases above cover.

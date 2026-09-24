@@ -38,8 +38,7 @@ object SetupScript {
      * The proxy is an LLM broker; bulk downloads, registries and VCS
      * hosting gain nothing from it and only burn phone CPU/battery plus
      * a single egress IP. Suffix-matched by most HTTP clients.
-     * NOTE: never add LLM provider hosts here (generativelanguage,
-     * openrouter, nvidia, zen, …) — those MUST stay proxied.
+     * NOTE: never add LLM provider hosts here (openrouter, nvidia, zen, …) — those MUST stay proxied.
      */
     const val BYPASS_HOSTS = "github.com,githubusercontent.com," +
         "objects.githubusercontent.com,release-assets.githubusercontent.com," +
