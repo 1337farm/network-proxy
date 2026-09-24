@@ -350,6 +350,7 @@ class MainActivity : AppCompatActivity() {
             if (snap.scenarioCounts.isEmpty()) "Retries: $retries"
             else "Retries: $retries (${snap.scenarioCounts.entries.joinToString { "${it.key}=${it.value}" }})"
         renderTokensTable()
+        renderCacheChart()
         val hosts = ProxyMetrics.hostSummary(3)
         findViewById<TextView>(R.id.hostsText)?.text =
             if (hosts.isEmpty()) ""
@@ -408,6 +409,73 @@ class MainActivity : AppCompatActivity() {
             )
         )
         footer?.text = "@ $tps tok/s (avg $avg)"
+    }
+
+    /** Cache-efficiency bars: per-host cache-read share (the north-star
+     *  metric) plus a TOTAL row. Emerald fill vs outline track. */
+    private fun renderCacheChart() {
+        val chart = findViewById<android.widget.LinearLayout>(R.id.cacheChart) ?: return
+        chart.removeAllViews()
+        val rows = ProxyMetrics.tokenSummary(5)
+        if (rows.isEmpty()) {
+            chart.visibility = View.GONE
+            return
+        }
+        chart.visibility = View.VISIBLE
+        val d = resources.displayMetrics.density
+        val emerald = getColor(R.color.status_running)
+        val track = getColor(R.color.outline)
+        val violet = getColor(R.color.title_violet)
+        for (r in rows) {
+            chart.addView(chartRow(r.host, r.cacheRead, r.inTokens, d, emerald, track, violet, bold = false))
+        }
+        chart.addView(
+            chartRow(
+                "TOTAL", ProxyMetrics.cacheReadTokens, ProxyMetrics.inputTokens,
+                d, emerald, track, violet, bold = true
+            )
+        )
+    }
+
+    private fun chartRow(
+        host: String, cacheRead: Long, input: Long, d: Float,
+        emerald: Int, track: Int, violet: Int, bold: Boolean
+    ): android.widget.LinearLayout {
+        val col = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(0, (4 * d).toInt(), 0, (4 * d).toInt())
+        }
+        val label = TextView(this).apply {
+            text = "$host  ${StatsFormat.cachePct(cacheRead, input)} cached"
+            textSize = 12f
+            typeface = android.graphics.Typeface.MONOSPACE
+            if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTextColor(violet)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        col.addView(label)
+        val bar = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            weightSum = 1f
+        }
+        val ratio = StatsFormat.cacheRatio(cacheRead, input).toFloat()
+        val fill = View(this).apply {
+            setBackgroundColor(emerald)
+            layoutParams = android.widget.LinearLayout.LayoutParams(0, (10 * d).toInt(), ratio)
+        }
+        val rest = View(this).apply {
+            setBackgroundColor(track)
+            layoutParams = android.widget.LinearLayout.LayoutParams(0, (10 * d).toInt(), (1f - ratio).coerceAtLeast(0f))
+        }
+        // weights of exactly 0 drop the view; keep a hairline so the
+        // track reads even at 0% / 100%.
+        if (ratio <= 0f) fill.layoutParams = android.widget.LinearLayout.LayoutParams((2 * d).toInt(), (10 * d).toInt())
+        if (ratio >= 1f) rest.layoutParams = android.widget.LinearLayout.LayoutParams(0, (10 * d).toInt(), 0f)
+        bar.addView(fill)
+        bar.addView(rest)
+        col.addView(bar)
+        return col
     }
 
     /** Hairline rule between table sections (header / TOTAL). */

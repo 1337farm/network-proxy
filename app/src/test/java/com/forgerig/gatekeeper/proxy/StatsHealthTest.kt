@@ -31,6 +31,17 @@ class StatsHealthTest {
     }
 
     @Test
+    fun cacheRatioAndPct() {
+        assertEquals(0.0, StatsFormat.cacheRatio(0, 0), 1e-9)
+        assertEquals(0.0, StatsFormat.cacheRatio(0, 100), 1e-9)
+        assertEquals(0.0, StatsFormat.cacheRatio(50, 0), 1e-9)
+        assertEquals(0.965, StatsFormat.cacheRatio(965, 1000), 1e-9)
+        assertEquals(1.0, StatsFormat.cacheRatio(2000, 1000), 1e-9) // clamped
+        assertEquals("96.5%", StatsFormat.cachePct(965, 1000))
+        assertEquals("0.0%", StatsFormat.cachePct(0, 0))
+    }
+
+    @Test
     fun healthRestartDecision() {
         assertFalse(ProxyService.healthNeedsRestart(0))
         assertFalse(ProxyService.healthNeedsRestart(2))
