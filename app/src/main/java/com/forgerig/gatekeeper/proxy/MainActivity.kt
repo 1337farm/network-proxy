@@ -369,10 +369,14 @@ class MainActivity : AppCompatActivity() {
         val footer = findViewById<TextView>(R.id.tokensFooterText)
         val rows = ProxyMetrics.tokenSummary(5)
         val tps = String.format(java.util.Locale.US, "%.1f", ProxyMetrics.outputTokensPerSecond())
+        // Session average alongside the trailing window: trailing reads 0
+        // whenever the stream has been idle >30s (correct but alarming);
+        // avg climbs iff output tokens are actually being counted.
+        val avg = String.format(java.util.Locale.US, "%.1f", ProxyMetrics.outputTokensAvg())
         table.removeAllViews()
         if (rows.isEmpty()) {
             table.visibility = View.GONE
-            footer?.text = "Tokens: in 0 / out 0 @ $tps tok/s"
+            footer?.text = "Tokens: in 0 / out 0 @ $tps tok/s (avg $avg)"
             return
         }
         table.visibility = View.VISIBLE
@@ -403,7 +407,7 @@ class MainActivity : AppCompatActivity() {
                 bold = true
             )
         )
-        footer?.text = "@ $tps tok/s"
+        footer?.text = "@ $tps tok/s (avg $avg)"
     }
 
     /** Hairline rule between table sections (header / TOTAL). */

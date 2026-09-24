@@ -21,6 +21,16 @@ class StatsHealthTest {
     }
 
     @Test
+    fun sessionAvgClimbsWithOutput() {
+        ProxyMetrics.resetTallies()
+        assertEquals(0.0, ProxyMetrics.outputTokensAvg(), 1e-9)
+        ProxyMetrics.addTokens(100, 50, 0, 0, "h")
+        assertTrue(ProxyMetrics.outputTokensAvg() > 0.0)
+        ProxyMetrics.resetTallies()
+        assertEquals(0.0, ProxyMetrics.outputTokensAvg(), 1e-9)
+    }
+
+    @Test
     fun healthRestartDecision() {
         assertFalse(ProxyService.healthNeedsRestart(0))
         assertFalse(ProxyService.healthNeedsRestart(2))
