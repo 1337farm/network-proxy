@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Ambient energy glow (full-bleed, clipped by the icon mask) -->
+    <path
+        android:fillColor="#FF2A1650"
+        android:pathData="M0,0h108v108h-108z" />
+    <path
+        android:fillColor="#3312077A"
+        android:pathData="M54,54m-52,0a52,52 0 1,0 104,0a52,52 0 1,0 -104,0" />
+    <path
+        android:fillColor="#227C3AED"
+        android:pathData="M54,54m-40,0a40,40 0 1,0 80,0a40,40 0 1,0 -80,0" />
+
+    <!-- Portal ring: even-odd annulus, violet -> fuchsia diagonal energy -->
+    <path
+        android:fillType="evenOdd"
+        android:pathData="M54,54m-30,0a30,30 0 1,0 60,0a30,30 0 1,0 -60,0M54,54m-21,0a21,21 0 1,0 42,0a21,21 0 1,0 -42,0">
+        <gradient
+            android:type="linear"
+            android:startX="24"
+            android:startY="24"
+            android:endX="84"
+            android:endY="84">
+            <item android:offset="0" android:color="#FF8B5CF6" />
+            <item android:offset="0.55" android:color="#FFE879F9" />
+            <item android:offset="1" android:color="#FF5EEAD4" />
+        </gradient>
+    </path>
+
+    <!-- Lightning bolt: the traffic strike, hot white core -->
+    <path
+        android:fillColor="#FFF5F0FF"
+        android:strokeColor="#FF5EEAD4"
+        android:strokeWidth="1.5"
+        android:strokeLineJoin="round"
+        android:pathData="M61,26 L40,58 L52,58 L47,82 L68,50 L55,50 Z" />
+
+    <!-- Network node sparks riding just outside the ring -->
+    <path
+        android:fillColor="#FF34D399"
+        android:pathData="M89,54m-4.5,0a4.5,4.5 0 1,0 9,0a4.5,4.5 0 1,0 -9,0" />
+    <path
+        android:fillColor="#FFFBBF24"
+        android:pathData="M19,54m-4.5,0a4.5,4.5 0 1,0 9,0a4.5,4.5 0 1,0 -9,0" />
+    <path
+        android:fillColor="#FFB9A3F8"
+        android:pathData="M54,19m-4.5,0a4.5,4.5 0 1,0 9,0a4.5,4.5 0 1,0 -9,0" />
+</vector>
