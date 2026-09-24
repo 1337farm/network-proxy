@@ -1059,27 +1059,44 @@ class ProxyService : Service() {
             return NextKey(same, leg, url, body)
         }
         // Same-provider pool exhausted — walk route legs after the current one.
-        if (leg == null || body == null) return null
-        val wantModel = try {
-            org.json.JSONObject(body.toString(Charsets.UTF_8)).optString("model", "")
-        } catch (_: Exception) { return null }
-        val route = store.routes.values.firstOrNull { r ->
-            r.legs.any { it.providerId == leg.providerId && it.model == leg.model }
-        } ?: return null
-        val idx = route.legs.indexOfFirst { it.providerId == leg.providerId && it.model == leg.model }
-        for (next in route.legs.drop(idx + 1)) {
-            val lp = store.providers[next.providerId] ?: continue
-            val lk = store.activeKey(lp.id)?.second ?: continue
-            try {
-                val bj = org.json.JSONObject(body.toString(Charsets.UTF_8))
-                bj.put("model", next.model)
-                val nb = bj.toString().toByteArray(Charsets.UTF_8)
-                val nu = ProviderStore.retarget(url, lp.baseUrl)
-                headers["Content-Length"] = nb.size.toString()
-                mutableHeaders["Content-Length"] = nb.size.toString()
-                ProxyMetrics.event("Leg failover '$wantModel' → ${lp.id}/${next.model}")
-                return NextKey(lp to lk, next, nu, nb)
-            } catch (_: Exception) { continue }
+        // (Skipped entirely without a leg context; spillover below covers it.)
+        if (leg != null && body != null) {
+            val wantModel = try {
+                org.json.JSONObject(body.toString(Charsets.UTF_8)).optString("model", "")
+            } catch (_: Exception) { null }
+            val route = if (wantModel != null) {
+                store.routes.values.firstOrNull { r ->
+                    r.legs.any { it.providerId == leg.providerId && it.model == leg.model }
+                }
+            } else null
+            if (route != null) {
+                val idx = route.legs.indexOfFirst { it.providerId == leg.providerId && it.model == leg.model }
+                for (next in route.legs.drop(idx + 1)) {
+                    val lp = store.providers[next.providerId] ?: continue
+                    val lk = store.activeKey(lp.id)?.second ?: continue
+                    try {
+                        val bj = org.json.JSONObject(body.toString(Charsets.UTF_8))
+                        bj.put("model", next.model)
+                        val nb = bj.toString().toByteArray(Charsets.UTF_8)
+                        val nu = ProviderStore.retarget(url, lp.baseUrl)
+                        headers["Content-Length"] = nb.size.toString()
+                        mutableHeaders["Content-Length"] = nb.size.toString()
+                        ProxyMetrics.event("Leg failover '$wantModel' → ${lp.id}/${next.model}")
+                        return NextKey(lp to lk, next, nu, nb)
+                    } catch (_: Exception) { continue }
+                }
+            }
+        }
+        // Cross-provider spillover (no route config needed): same model
+        // string, same wire family, retargeted URL. Lets Zen-exhausted
+        // traffic spill to OpenRouter/etc. mid-keyLoop.
+        store.spilloverTarget(provider.id, failedKeyId)?.let { (lp, lk) ->
+            val nu = ProviderStore.retarget(url, lp.baseUrl)
+            val len = (body?.size ?: 0).toString()
+            headers["Content-Length"] = len
+            mutableHeaders["Content-Length"] = len
+            ProxyMetrics.event("Spillover '${provider.id}' → '${lp.id}' (same model, same family)")
+            return NextKey(lp to lk, null, nu, body)
         }
         // Full circle: any usable key on the ORIGINAL provider (cooldowns may differ).
         val retry = store.activeKey(provider.id)
