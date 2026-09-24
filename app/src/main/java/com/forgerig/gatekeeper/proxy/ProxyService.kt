@@ -366,6 +366,12 @@ class ProxyService : Service() {
                 }.forEach { mutableHeaders.remove(it) }
                 mutableHeaders[p.authHeader] = store.authValue(p, k)
             }
+            // Feed the observed-model registry (spillover candidates) with
+            // the upstream model actually requested (post route-rewrite).
+            if (provider != null && body != null) {
+                val seen = modelOf(body)
+                if (seen.isNotBlank()) ModelRouter.noteObserved(provider.id, seen)
+            }
             var finalCode = -1
             var transferredTotal = 0L
             var keyRounds = 0
@@ -393,6 +399,7 @@ class ProxyService : Service() {
                     ) {
                         val retryAfterSecs = resp.headers["Retry-After"]?.toLongOrNull()
                         store.report(provider!!.id, kc.second.id, preCode, retryAfterSecs)
+                        ModelHealth.recordErr(provider.id, modelOf(body))
                         keyRounds++
                         val next = nextUsableKey(
                             store, provider, kc.second.id, routeLeg,
@@ -418,6 +425,9 @@ class ProxyService : Service() {
                         keyCtx?.let { (p, k) ->
                             val ra = r.headers["Retry-After"]?.toLongOrNull()
                             store.report(p.id, k.id, r.code, ra)
+                            val m = modelOf(body)
+                            if (r.code in 200..299) ModelHealth.recordOk(p.id, m)
+                            else ModelHealth.recordErr(p.id, m)
                         }
                         val action = ScenarioClassifier.toRetryAction(scenario)
                         if (action == RetryAction.RETRY_WITH_BACKOFF && policy.shouldRetry(attempt)) {
@@ -1087,22 +1097,43 @@ class ProxyService : Service() {
                 }
             }
         }
-        // Cross-provider spillover (no route config needed): same model
-        // string, same wire family, retargeted URL. Lets Zen-exhausted
-        // traffic spill to OpenRouter/etc. mid-keyLoop.
-        store.spilloverTarget(provider.id, failedKeyId)?.let { (lp, lk) ->
-            val nu = ProviderStore.retarget(url, lp.baseUrl)
-            val len = (body?.size ?: 0).toString()
+        // Cross-provider spillover (no route config needed): best
+        // comparable model on a same-family provider, retargeted URL.
+        // Lets Zen-exhausted traffic spill to OpenRouter/etc. mid-keyLoop.
+        val failedModel = body?.let { modelOf(it) } ?: ""
+        store.spilloverTarget(provider.id, failedModel, failedKeyId)?.let { sel ->
+            var nb = body
+            if (sel.model.isNotBlank() && body != null) {
+                try {
+                    val bj = org.json.JSONObject(body.toString(Charsets.UTF_8))
+                    bj.put("model", sel.model)
+                    nb = bj.toString().toByteArray(Charsets.UTF_8)
+                } catch (_: Exception) { /* keep original body */ }
+            }
+            val nu = ProviderStore.retarget(url, sel.provider.baseUrl)
+            val len = (nb?.size ?: 0).toString()
             headers["Content-Length"] = len
             mutableHeaders["Content-Length"] = len
-            ProxyMetrics.event("Spillover '${provider.id}' → '${lp.id}' (same model, same family)")
-            return NextKey(lp to lk, null, nu, body)
+            ProxyMetrics.event(
+                "Spillover '${provider.id}' → '${sel.provider.id}/${sel.model}' (tier ${sel.tier})"
+            )
+            return NextKey(sel.provider to sel.key, null, nu, nb)
         }
         // Full circle: any usable key on the ORIGINAL provider (cooldowns may differ).
         val retry = store.activeKey(provider.id)
         return if (retry != null && retry.second.id != failedKeyId) {
             NextKey(retry, leg, url, body)
         } else null
+    }
+
+    /** Top-level "model" field of a JSON API body ("" when absent/opaque). */
+    private fun modelOf(body: ByteArray?): String {
+        if (body == null) return ""
+        return try {
+            org.json.JSONObject(body.toString(Charsets.UTF_8)).optString("model", "")
+        } catch (_: Exception) {
+            ""
+        }
     }
 
     // ---- Streaming payload trims (extreme, but client-safe) ----

@@ -292,28 +292,16 @@ class ProviderStore private constructor() {
     private val rr = AtomicInteger(0)
 
     /**
-     * Cross-provider spillover: when [fromId]'s pool is exhausted, find
-     * another provider serving the SAME wire family with a live key, so
-     * the same request body/model retries byte-identically elsewhere
-     * (e.g. Zen-exhausted Claude traffic spills to OpenRouter with no
-     * route config). Deterministic id order. Honors the master
-     * [routeFailoverEnabled] switch. Null when nothing qualifies.
+     * Cross-provider spillover via [ModelRouter]: same-model tiers, then
+     * health-best comparable model (see router ladder). Null when nothing
+     * qualifies (caller keeps legacy behavior).
      */
     @Synchronized
-    fun spilloverTarget(fromId: String, failedKeyId: String): Pair<Provider, ApiKey>? {
-        if (!routeFailoverEnabled) return null
-        val from = providers[fromId] ?: return null
-        val fam = com.forgerig.gatekeeper.proxy.context.WireFamily.detect(from.baseUrl)
-        if (fam == com.forgerig.gatekeeper.proxy.context.WireFamily.UNKNOWN) return null
-        for (lp in providers.values.sortedBy { it.id }) {
-            if (lp.id == fromId) continue
-            if (com.forgerig.gatekeeper.proxy.context.WireFamily.detect(lp.baseUrl) != fam) continue
-            val lk = activeKey(lp.id)?.second ?: continue
-            if (lk.id == failedKeyId) continue
-            return lp to lk
-        }
-        return null
-    }
+    fun spilloverTarget(
+        fromId: String,
+        failedModel: String,
+        failedKeyId: String
+    ): ModelRouter.Selection? = ModelRouter.select(this, fromId, failedModel, failedKeyId)
 
     /** Active key for [providerId], skipping disabled/cooled/day-limited keys. Null if none usable. */
     @Synchronized
