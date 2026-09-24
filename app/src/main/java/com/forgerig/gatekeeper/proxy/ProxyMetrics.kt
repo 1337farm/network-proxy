@@ -446,6 +446,7 @@ object ProxyMetrics {
         }
         if (output > 0) {
             val now = System.currentTimeMillis()
+            if (firstOutputMs == 0L) firstOutputMs = now
             tokenEventTimes.add(now to output)
             pruneTokenEvents(now)
         }
@@ -454,6 +455,8 @@ object ProxyMetrics {
     // ---- Output tokens/sec (trailing window over completion tokens) ----
     private val tokenEventTimes = ConcurrentLinkedQueue<Pair<Long, Long>>()
     private const val TPS_WINDOW_MS = 30_000L
+    /** Set on the first counted output token; session average hangs off it. */
+    @Volatile private var firstOutputMs: Long = 0L
 
     private fun pruneTokenEvents(now: Long, windowMs: Long = TPS_WINDOW_MS) {
         while (true) {
@@ -472,6 +475,19 @@ object ProxyMetrics {
         var sum = 0L
         for ((_, n) in tokenEventTimes) sum += n
         return sum.toDouble() / (windowMs / 1000.0)
+    }
+
+    /**
+     * Session-average output tok/s since the first counted output token.
+     * Unlike the trailing window, this never reads 0 while output exists —
+     * if trailing is 0 but avg climbs, the stream is idle, not broken.
+     */
+    @Synchronized
+    fun outputTokensAvg(): Double {
+        val start = firstOutputMs
+        if (start == 0L || outputTokens <= 0) return 0.0
+        val elapsedMs = (System.currentTimeMillis() - start).coerceAtLeast(1L)
+        return outputTokens.toDouble() / (elapsedMs / 1000.0)
     }
 
     fun hostSummary(top: Int = 5): List<Triple<String, Long, Long>> =
@@ -512,6 +528,7 @@ object ProxyMetrics {
         cacheWriteTokens = 0
         tokenTallies.clear()
         tokenEventTimes.clear()
+        firstOutputMs = 0L
     }
 
     // usage-block scanner: finds Anthropic + OpenAI token fields in a
