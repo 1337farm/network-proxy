@@ -152,6 +152,23 @@
                         android:text=""/>
 
                     <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:text="Cache efficiency"
+                        android:textSize="13sp"
+                        android:textStyle="bold"
+                        style="@style/Text.SectionTitle"/>
+
+                    <LinearLayout
+                        android:id="@+id/cacheChart"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:orientation="vertical">
+                    </LinearLayout>
+
+                    <TextView
                         android:id="@+id/hostsText"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"

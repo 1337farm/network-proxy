@@ -3,8 +3,8 @@ package com.forgerig.gatekeeper.proxy
 import java.util.Locale
 
 /**
- * Compact number rendering for the statistics card's real table widget
- * (TableLayout handles column alignment; these just shorten magnitudes).
+ * Compact number rendering for the statistics card widgets
+ * (TableLayout + chart handle layout; these just shorten magnitudes).
  *
  * Pure functions (no Android deps) so rendering stays unit-tested.
  */
@@ -21,4 +21,17 @@ object StatsFormat {
             else -> String.format(Locale.US, "%.2fB", n / 1_000_000_000.0)
         }
     }
+
+    /**
+     * Cache-read ratio in [0,1]: share of input tokens served from cache.
+     * Zero-input → 0 (no bar, not 100%).
+     */
+    fun cacheRatio(cacheRead: Long, input: Long): Double {
+        if (input <= 0 || cacheRead <= 0) return 0.0
+        return (cacheRead.toDouble() / input.toDouble()).coerceIn(0.0, 1.0)
+    }
+
+    /** "96.5%" style label for [cacheRatio]. */
+    fun cachePct(cacheRead: Long, input: Long): String =
+        String.format(Locale.US, "%.1f%%", 100.0 * cacheRatio(cacheRead, input))
 }
