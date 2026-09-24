@@ -212,7 +212,13 @@ object ProxyMetrics {
         }
     }
 
-    fun recordRequestStart(sessionId: String, requestId: String, url: String, method: String) {
+    fun recordRequestStart(
+        sessionId: String,
+        requestId: String,
+        url: String,
+        method: String,
+        llmHosts: Set<String> = emptySet()
+    ) {
         requestStartTimes[requestId] = System.currentTimeMillis()
         requestMetrics[requestId] = RequestMetrics(
             requestId = requestId,
@@ -223,12 +229,27 @@ object ProxyMetrics {
             bytesTransferred = 0,
             statusCode = 0,
             scenario = NetworkScenario.UNKNOWN.name,
-            category = categorizeUrl(url)
+            category = categorizeUrl(url, llmHosts)
         )
     }
 
-    private fun categorizeUrl(url: String): String {
+    private fun categorizeUrl(url: String): String = categorizeUrl(url, emptySet())
+
+    /**
+     * Host-aware categorization. When [llmHosts] is non-empty, hosts
+     * outside the LLM allowlist are "passthrough" (opaque-tunneled,
+     * never brokered) regardless of URL shape — this fixes e.g.
+     * api.github.com, which the "github.com" file rule used to catch.
+     * Empty [llmHosts] preserves legacy shape-only behavior.
+     */
+    fun categorizeUrl(url: String, llmHosts: Set<String>): String {
         val lowerUrl = url.lowercase()
+        if (llmHosts.isNotEmpty()) {
+            val host = LlmPolicy.extractHost(url)
+            if (host.isNotEmpty() && !LlmPolicy.matchesAny(host, llmHosts)) {
+                return "passthrough"
+            }
+        }
         // File downloads: large payloads, binaries, archives, media
         val filePatterns = listOf(
             ".apk", ".exe", ".dmg", ".deb", ".rpm", ".zip", ".tar", ".gz",
@@ -249,8 +270,11 @@ object ProxyMetrics {
             "anthropic", "openai", "googleapis", "cloudflare", "fastly",
             "search", "parallel", "vector", "embedding", "completion"
         )
-        if (filePatterns.any { lowerUrl.contains(it) }) return "file"
+        // API shape wins over file shape: an API-shaped URL serving bytes
+        // is still API traffic from the proxy's perspective (e.g. the
+        // "github.com" file rule must not catch "api.github.com").
         if (apiPatterns.any { lowerUrl.contains(it) }) return "api"
+        if (filePatterns.any { lowerUrl.contains(it) }) return "file"
         return "other"
     }
 

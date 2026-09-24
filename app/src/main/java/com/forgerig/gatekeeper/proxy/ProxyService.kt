@@ -212,13 +212,19 @@ class ProxyService : Service() {
 
             // HTTPS tunneling: CONNECT host:port -> 200 + raw relay.
             if (method == "CONNECT") {
-                if (metricsEnabled) ProxyMetrics.recordRequestStart(sessionId, requestId, url, method)
+                if (metricsEnabled) ProxyMetrics.recordRequestStart(
+                    sessionId, requestId, url, method,
+                    ProviderBroker.store(this).llmHosts()
+                )
                 handleConnect(socket, rawIn, output, url, sessionId, requestId, startedAt)
                 return
             }
 
             var targetUrl = if (url.startsWith("http")) url else "http://${socket.inetAddress.hostAddress}$url"
-            if (metricsEnabled) ProxyMetrics.recordRequestStart(sessionId, requestId, targetUrl, method)
+            if (metricsEnabled) ProxyMetrics.recordRequestStart(
+                sessionId, requestId, targetUrl, method,
+                ProviderBroker.store(this).llmHosts()
+            )
 
             var contentLength = 0L
             val headers = mutableMapOf<String, String>()
@@ -260,22 +266,52 @@ class ProxyService : Service() {
                 body = readExact(rawIn, contentLength.toInt())
             }
 
+            // --- LLM-only gate: broker treatment (keys, routes, context,
+            // MITM) is reserved for configured provider hosts. Anything
+            // else tunnels opaque by default, or 403s in strict mode.
+            val routeStore = ProviderBroker.store(this)
+            val llmDecision = LlmPolicy.decide(
+                LlmPolicy.extractHost(targetUrl),
+                routeStore.llmHosts(),
+                routeStore.llmOnlyStrict
+            )
+            if (llmDecision == LlmPolicy.Decision.DENY) {
+                val msg = LlmPolicy.denyBody(LlmPolicy.extractHost(targetUrl))
+                ProxyMetrics.eventWarning("LLM-only deny: $msg")
+                val bb = msg.toByteArray()
+                output.write(
+                    ("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n" +
+                        "Content-Length: ${bb.size}\r\n\r\n").toByteArray()
+                )
+                output.write(bb)
+                output.flush()
+                if (metricsEnabled) ProxyMetrics.recordRequestEnd(
+                    sessionId, requestId, 403, bb.size.toLong(), NetworkScenario.PERMANENT_FAILURE
+                )
+                return
+            }
+            val brokered = llmDecision == LlmPolicy.Decision.BROKERED
+
             // --- Context layer (smart router, phase 1: gated hook only). ---
             // When enabled and the body parses as a known LLM wire format,
             // the decision carries the correlated conversation; the legacy
             // path below still does the forwarding (null = untouched).
+            // Skipped entirely for off-allowlist traffic.
             @Suppress("UNUSED_VARIABLE")
-            val ctxDecision = com.forgerig.gatekeeper.proxy.context.ContextLayer
-                .maybeProcess(targetUrl, method, body)
+            val ctxDecision = if (brokered) {
+                com.forgerig.gatekeeper.proxy.context.ContextLayer
+                    .maybeProcess(targetUrl, method, body)
+            } else null
 
             // --- Custom-route rewrite ("we are the provider"): if the
             // request body names one of OUR model ids, swap in the first
             // healthy leg (provider + upstream model) and retarget the URL.
             // Leg failover happens naturally via the key-rollover loop when
             // a leg's keys are exhausted... plus explicit leg advance below.
-            val routeStore = ProviderBroker.store(this)
+            // Brokered traffic only: foreign bodies never name our models,
+            // and skipping the parse saves the CPU on bulk downloads.
             var routeLeg: ProviderStore.RouteLeg? = null
-            if (routeStore.routeFailoverEnabled && body != null &&
+            if (brokered && routeStore.routeFailoverEnabled && body != null &&
                 (headers["Content-Type"]?.contains("json") == true ||
                     headers["content-type"]?.contains("json") == true)
             ) {
@@ -531,6 +567,33 @@ class ProxyService : Service() {
         val hostPort = authority.split(":")
         val host = hostPort[0]
         val port = hostPort.getOrNull(1)?.toIntOrNull() ?: 443
+        // LLM-only gate: MITM split + usage scan are reserved for
+        // configured provider hosts. Foreign hosts tunnel opaque
+        // (or 403 in strict mode) — no leaf issuance, no scan CPU.
+        val connStore = ProviderBroker.store(this)
+        when (LlmPolicy.decide(host, connStore.llmHosts(), connStore.llmOnlyStrict)) {
+            LlmPolicy.Decision.DENY -> {
+                val msg = LlmPolicy.denyBody(host)
+                ProxyMetrics.eventWarning("LLM-only deny: $msg")
+                val bb = msg.toByteArray()
+                clientOut.write(
+                    ("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n" +
+                        "Content-Length: ${bb.size}\r\n\r\n").toByteArray()
+                )
+                clientOut.write(bb)
+                clientOut.flush()
+                if (metricsEnabled) ProxyMetrics.recordRequestEnd(
+                    sessionId, requestId, 403, bb.size.toLong(), NetworkScenario.PERMANENT_FAILURE
+                )
+                try { clientSocket.close() } catch (_: Exception) {}
+                return
+            }
+            LlmPolicy.Decision.TUNNEL -> {
+                opaqueTunnel(clientSocket, clientIn, clientOut, host, port, sessionId, requestId, startedAt)
+                return
+            }
+            LlmPolicy.Decision.BROKERED -> { /* fall through to MITM attempt */ }
+        }
         // Opt-in HTTPS split (Decrypt-HTTPS toggle): terminate client TLS
         // with our local CA leaf, re-originate verified TLS upstream, scan
         // plaintext usage blocks. Needs the CA installed client-side
@@ -540,6 +603,24 @@ class ProxyService : Service() {
         if (mitmEnabled && handleConnectMitm(clientSocket, clientIn, clientOut, host, port, sessionId, requestId, startedAt)) {
             return
         }
+        opaqueTunnel(clientSocket, clientIn, clientOut, host, port, sessionId, requestId, startedAt)
+    }
+
+    /**
+     * Byte-identical relay for one CONNECT session (no MITM, no scan).
+     * Used for off-allowlist hosts under LLM-only policy and as the
+     * fallback when the MITM split declines.
+     */
+    private fun opaqueTunnel(
+        clientSocket: Socket,
+        clientIn: BufferedInputStream,
+        clientOut: java.io.OutputStream,
+        host: String,
+        port: Int,
+        sessionId: String,
+        requestId: String,
+        startedAt: Long
+    ) {
         var upstream: Socket? = null
         try {
             upstream = Socket()

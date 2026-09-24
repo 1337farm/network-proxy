@@ -33,6 +33,21 @@ object SetupScript {
      *  unit-tested core; [build] keeps the Context signature for callers. */
     fun build(context: Context, port: Int): String = scriptFor(port)
 
+    /**
+     * Non-LLM hosts that bypass the proxy entirely (direct connection).
+     * The proxy is an LLM broker; bulk downloads, registries and VCS
+     * hosting gain nothing from it and only burn phone CPU/battery plus
+     * a single egress IP. Suffix-matched by most HTTP clients.
+     * NOTE: never add LLM provider hosts here (generativelanguage,
+     * openrouter, nvidia, zen, …) — those MUST stay proxied.
+     */
+    const val BYPASS_HOSTS = "github.com,githubusercontent.com," +
+        "objects.githubusercontent.com,release-assets.githubusercontent.com," +
+        "registry.npmjs.org,nodejs.org,pypi.org,files.pythonhosted.org," +
+        "maven.apache.org,repo.maven.apache.org,plugins.gradle.org,services.gradle.org," +
+        "dl.google.com,storage.googleapis.com,blob.core.windows.net," +
+        "crates.io,static.crates.io"
+
     /** Pure core: no Context needed, safe to call from JVM unit tests. */
     fun scriptFor(port: Int): String {
         return """
@@ -41,10 +56,13 @@ object SetupScript {
             |# phone - this only routes this terminal through it. Start the
             |# app with the Start button first, then paste this block.
             |# Safe to run repeatedly: every step below converges.
-            |export HTTP_PROXY="http://127.0.0.1:${port}" HTTPS_PROXY="http://127.0.0.1:${port}" NO_PROXY="localhost,127.0.0.1,::1"
-            |export http_proxy="http://127.0.0.1:${port}" https_proxy="http://127.0.0.1:${port}" no_proxy="localhost,127.0.0.1,::1"
+            |export HTTP_PROXY="http://127.0.0.1:${port}" HTTPS_PROXY="http://127.0.0.1:${port}" NO_PROXY="localhost,127.0.0.1,::1,${BYPASS_HOSTS}"
+            |export http_proxy="http://127.0.0.1:${port}" https_proxy="http://127.0.0.1:${port}" no_proxy="localhost,127.0.0.1,::1,${BYPASS_HOSTS}"
             |# Both cases: some runtimes (node/bun) only honor lowercase.
             |# ::1 in NO_PROXY keeps TUI<->server loopback direct (no loops).
+            |# BYPASS_HOSTS keeps non-LLM traffic (git hosts, registries,
+            |# maven/gradle, big downloads) off the proxy entirely - it is
+            |# an LLM broker, not a general egress.
             |# Persist the same env into ~/.bashrc inside fenced markers, so
             |# the cleanup script can find and remove exactly this block.
             |# Inserted ABOVE the PS1 early-exit guard ('[ -z ... ] && return')
@@ -146,10 +164,10 @@ object SetupScript {
             |        begin,
             |        'export HTTP_PROXY="http://127.0.0.1:' + port + '"',
             |        'export HTTPS_PROXY="http://127.0.0.1:' + port + '"',
-            |        'export NO_PROXY="localhost,127.0.0.1,::1"',
-            |        'export http_proxy="http://127.0.0.1:' + port + '"',
-            |        'export https_proxy="http://127.0.0.1:' + port + '"',
-            |        'export no_proxy="localhost,127.0.0.1,::1"',
+             |        'export NO_PROXY="localhost,127.0.0.1,::1,${BYPASS_HOSTS}"',
+             |        'export http_proxy="http://127.0.0.1:' + port + '"',
+             |        'export https_proxy="http://127.0.0.1:' + port + '"',
+             |        'export no_proxy="localhost,127.0.0.1,::1,${BYPASS_HOSTS}"',
             |        ca_begin,
              |        'export SSL_CERT_FILE="${"$"}HOME/.config/network-proxy/bundle.pem"',
              |        'export REQUESTS_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"',

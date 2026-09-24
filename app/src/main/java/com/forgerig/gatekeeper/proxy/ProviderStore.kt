@@ -118,6 +118,16 @@ class ProviderStore private constructor() {
     var max429CoolDownMs: Long = 30 * 60_000
     /** Soft daily-hit threshold on Zen keys: exceeding cools till UTC midnight. */
     var zenDayHits: Int = 200
+    /**
+     * Strict LLM-only mode: refuse non-provider hosts with 403 instead of
+     * tunneling them opaque. Default false (connectivity-preserving):
+     * off-allowlist traffic tunnels byte-identical with no key/MITM/scan.
+     */
+    var llmOnlyStrict: Boolean = false
+
+    /** Hosts that get full broker treatment (from providers' base URLs). */
+    fun llmHosts(): Set<String> =
+        LlmPolicy.hostsFromBaseUrls(providers.values.map { it.baseUrl })
 
     /** UTC day bucket "yyyy-MM-dd" + ms until next UTC midnight. */
     fun utcDay(): Pair<String, Long> {
@@ -142,6 +152,7 @@ class ProviderStore private constructor() {
         o.put("escalate429", escalate429)
         o.put("max429CoolDownMs", max429CoolDownMs)
         o.put("zenDayHits", zenDayHits)
+        o.put("llmOnlyStrict", llmOnlyStrict)
         o.put("providers", JSONArray(providers.values.map { it.toJson() }))
         o.put("routes", JSONArray(routes.values.map { it.toJson() }))
         return o.toString()
@@ -202,6 +213,7 @@ class ProviderStore private constructor() {
             store.escalate429 = o.optBoolean("escalate429", true)
             store.max429CoolDownMs = o.optLong("max429CoolDownMs", 30 * 60_000)
             store.zenDayHits = o.optInt("zenDayHits", 200)
+            store.llmOnlyStrict = o.optBoolean("llmOnlyStrict", false)
             o.optJSONArray("providers")?.let { arr ->
                 for (i in 0 until arr.length()) {
                     val p = Provider.fromJson(arr.getJSONObject(i))
