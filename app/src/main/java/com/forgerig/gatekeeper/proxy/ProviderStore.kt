@@ -169,6 +169,7 @@ class ProviderStore private constructor() {
          */
         fun wellKnown(): List<Provider> = listOf(
             Provider("opencode-zen", "https://opencode.ai/zen/v1", "Authorization", "Bearer "),
+            Provider("openrouter", "https://openrouter.ai/api/v1", "Authorization", "Bearer "),
             Provider("nvidia", "https://integrate.api.nvidia.com/v1", "Authorization", "Bearer "),
             Provider("z-ai", "https://open.bigmodel.cn/api/paas/v4", "Authorization", "Bearer "),
             // NOTE: no Google entry — no usable free LLM tier, so it is not
