@@ -42,6 +42,28 @@ class StatsHealthTest {
     }
 
     @Test
+    fun rateHistoryBucketsAndZeroFills() {
+        ProxyMetrics.resetTallies()
+        val t0 = 1_700_000_000_000L // fixed epoch ms for determinism
+        ProxyMetrics.sampleOutput(10, t0)
+        ProxyMetrics.sampleOutput(5, t0 + 200) // same second → merged
+        ProxyMetrics.sampleOutput(7, t0 + 3_000) // +3s
+        val hist = ProxyMetrics.rateHistory(5, t0 + 4_000)
+        assertEquals(listOf(15L, 0L, 0L, 7L, 0L), hist)
+        // window cap: oldest evicted past RATE_CHART_SECS
+        for (i in 0..(ProxyMetrics.RATE_CHART_SECS + 5)) {
+            ProxyMetrics.sampleOutput(1, t0 + i * 1000L)
+        }
+        val capped = ProxyMetrics.rateHistory(ProxyMetrics.RATE_CHART_SECS, t0 + 10_000_000L)
+        assertEquals(ProxyMetrics.RATE_CHART_SECS, capped.size)
+        ProxyMetrics.resetTallies()
+        assertEquals(
+            List(ProxyMetrics.RATE_CHART_SECS) { 0L },
+            ProxyMetrics.rateHistory()
+        )
+    }
+
+    @Test
     fun healthRestartDecision() {
         assertFalse(ProxyService.healthNeedsRestart(0))
         assertFalse(ProxyService.healthNeedsRestart(2))

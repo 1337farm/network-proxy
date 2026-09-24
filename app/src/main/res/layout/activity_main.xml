@@ -169,6 +169,21 @@
                     </LinearLayout>
 
                     <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:text="Output rate (tok/s, trailing 60s)"
+                        android:textSize="13sp"
+                        android:textStyle="bold"
+                        style="@style/Text.SectionTitle"/>
+
+                    <com.forgerig.gatekeeper.proxy.TokenRateView
+                        android:id="@+id/rateChart"
+                        android:layout_width="match_parent"
+                        android:layout_height="96dp"
+                        android:layout_marginTop="4dp"/>
+
+                    <TextView
                         android:id="@+id/hostsText"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"

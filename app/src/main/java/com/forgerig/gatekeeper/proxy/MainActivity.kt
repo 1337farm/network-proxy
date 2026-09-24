@@ -351,6 +351,7 @@ class MainActivity : AppCompatActivity() {
             else "Retries: $retries (${snap.scenarioCounts.entries.joinToString { "${it.key}=${it.value}" }})"
         renderTokensTable()
         renderCacheChart()
+        findViewById<TokenRateView>(R.id.rateChart)?.setSamples(ProxyMetrics.rateHistory())
         val hosts = ProxyMetrics.hostSummary(3)
         findViewById<TextView>(R.id.hostsText)?.text =
             if (hosts.isEmpty()) ""

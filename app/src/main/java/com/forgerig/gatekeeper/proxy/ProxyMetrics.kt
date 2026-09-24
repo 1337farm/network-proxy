@@ -449,6 +449,7 @@ object ProxyMetrics {
             if (firstOutputMs == 0L) firstOutputMs = now
             tokenEventTimes.add(now to output)
             pruneTokenEvents(now)
+            sampleOutput(output, now)
         }
     }
 
@@ -490,6 +491,39 @@ object ProxyMetrics {
         return outputTokens.toDouble() / (elapsedMs / 1000.0)
     }
 
+    // ---- Per-second output samples for the rate bar chart ----
+    /** Ring of (second-epoch → output tokens); capped, oldest evicted. */
+    private val rateBuckets = java.util.ArrayDeque<Pair<Long, Long>>()
+    const val RATE_CHART_SECS = 60
+
+    /** Fold output tokens into the current second-bucket (test seam: [atMs]). */
+    @Synchronized
+    fun sampleOutput(count: Long, atMs: Long = System.currentTimeMillis()) {
+        if (count <= 0) return
+        val sec = atMs / 1000
+        val last = rateBuckets.peekLast()
+        if (last != null && last.first == sec) {
+            rateBuckets.removeLast()
+            rateBuckets.addLast(sec to last.second + count)
+        } else {
+            rateBuckets.addLast(sec to count)
+        }
+        while (rateBuckets.size > RATE_CHART_SECS) rateBuckets.removeFirst()
+    }
+
+    /**
+     * Last [nSecs] per-second output counts, oldest-first, zero-filled for
+     * idle seconds (trailing). Pure shape: list size always == nSecs.
+     */
+    @Synchronized
+    fun rateHistory(nSecs: Int = RATE_CHART_SECS, atMs: Long = System.currentTimeMillis()): List<Long> {
+        val n = nSecs.coerceIn(1, RATE_CHART_SECS)
+        val nowSec = atMs / 1000
+        val map = HashMap<Long, Long>(rateBuckets.size * 2)
+        for ((s, c) in rateBuckets) map[s] = (map[s] ?: 0L) + c
+        return List(n) { i -> map[nowSec - n + 1 + i] ?: 0L }
+    }
+
     fun hostSummary(top: Int = 5): List<Triple<String, Long, Long>> =
         hostTallies.entries.sortedByDescending { it.value.upBytes + it.value.downBytes }
             .take(top).map { Triple(it.key, it.value.upBytes, it.value.downBytes) }
@@ -528,6 +562,7 @@ object ProxyMetrics {
         cacheWriteTokens = 0
         tokenTallies.clear()
         tokenEventTimes.clear()
+        rateBuckets.clear()
         firstOutputMs = 0L
     }
 
