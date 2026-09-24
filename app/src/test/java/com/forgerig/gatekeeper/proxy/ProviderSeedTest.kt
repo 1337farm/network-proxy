@@ -75,6 +75,18 @@ class ProviderSeedTest {
         assert(!store.providers.containsKey("google"))
     }
 
+    @Test
+    fun wellKnownSeedsOpenRouterWithBearerWiring() {
+        val store = ProviderStore.blank()
+        ProviderStore.ensureWellKnown(store)
+        val or = store.providers["openrouter"]!!
+        assertEquals("https://openrouter.ai/api/v1", or.baseUrl)
+        assertEquals("Authorization", or.authHeader)
+        assertEquals("Bearer ", or.authScheme)
+        // allowlisted for broker treatment under LLM-only policy
+        assertTrue(store.llmHosts().contains("openrouter.ai"))
+    }
+
     // NOTE: fromJson() itself isn't unit-tested here — org.json is an
     // Android stub under plain JVM tests ("not mocked"). fromJson delegates
     // to ensureWellKnown, which the cases above cover.
