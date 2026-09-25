@@ -50,11 +50,14 @@ object SetupScript {
     /** Pure core: no Context needed, safe to call from JVM unit tests. */
     fun scriptFor(port: Int): String {
         return """
-            |# >>> network-proxy setup (run in proot Ubuntu) >>>
+            |# >>> network-proxy setup (run in Termux or proot Ubuntu; auto-detects) >>>
             |# NOTE: the proxy itself runs inside the Android app on this
             |# phone - this only routes this terminal through it. Start the
             |# app with the Start button first, then paste this block.
             |# Safe to run repeatedly: every step below converges.
+            |# Pasted in Termux, it also pushes the MITM CA into every
+            |# installed Ubuntu proot distro (env vars still need a separate
+            |# paste inside each distro - they do not cross proot).
             |export HTTP_PROXY="http://127.0.0.1:${port}" HTTPS_PROXY="http://127.0.0.1:${port}" NO_PROXY="localhost,127.0.0.1,::1,${BYPASS_HOSTS}"
             |export http_proxy="http://127.0.0.1:${port}" https_proxy="http://127.0.0.1:${port}" no_proxy="localhost,127.0.0.1,::1,${BYPASS_HOSTS}"
             |# Both cases: some runtimes (node/bun) only honor lowercase.
@@ -243,15 +246,67 @@ object SetupScript {
              |  done
              |  if [[ -n "${"$"}SYS_BUNDLE" ]]; then
              |    cat "${"$"}SYS_BUNDLE" "${"$"}HOME/.config/network-proxy/ca.pem" > "${"$"}HOME/.config/network-proxy/bundle.pem"
-              |    export SSL_CERT_FILE="${"$"}HOME/.config/network-proxy/bundle.pem"
-              |    export REQUESTS_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"
-              |    export NODE_EXTRA_CA_CERTS="${"$"}HOME/.config/network-proxy/ca.pem"
-              |    export CURL_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"
-              |    export GIT_SSL_CAINFO="${"$"}HOME/.config/network-proxy/bundle.pem"
+             |    export SSL_CERT_FILE="${"$"}HOME/.config/network-proxy/bundle.pem"
+             |    export REQUESTS_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"
+             |    export NODE_EXTRA_CA_CERTS="${"$"}HOME/.config/network-proxy/ca.pem"
+             |    export CURL_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"
+             |    export GIT_SSL_CAINFO="${"$"}HOME/.config/network-proxy/bundle.pem"
              |  fi
              |  if [[ -d /usr/local/share/ca-certificates ]]; then
              |    cp "${"$"}HOME/.config/network-proxy/ca.pem" /usr/local/share/ca-certificates/network-proxy-ca.crt 2>/dev/null || true
              |    update-ca-certificates 2>/dev/null || true
+             |  fi
+             |  # --- Environment detect: Termux vs Ubuntu proot ---
+             |  # uname -o is "Android" under Termux (even inside some proot
+             |  # wrappers), so require BOTH the Android marker AND a live
+             |  # ${"$"}PREFIX dir. ${"$"}PREFIX leaks into proot env, therefore an
+             |  # Ubuntu os-release always wins over the Termux guess.
+             |  IS_TERMUX=0
+             |  if [[ "$(uname -o 2>/dev/null)" == "Android" ]] && [[ -n "${"$"}{PREFIX:-}" ]] && [[ -d "${"$"}PREFIX" ]]; then IS_TERMUX=1; fi
+             |  IS_UBUNTU=0
+             |  if grep -qi '^ID=ubuntu' /etc/os-release 2>/dev/null; then IS_UBUNTU=1; IS_TERMUX=0; fi
+             |  if [[ "${"$"}IS_TERMUX" == "1" ]]; then
+             |    echo "Termux detected: CA trusted above for this shell; now pushing into Ubuntu proot distros"
+             |    # Termux itself has no update-ca-certificates store tool by
+             |    # default - the env bundle + exports above are its trust.
+             |    # Fan out the CA FILE into every installed Ubuntu rootfs so
+             |    # each distro trusts MITM splits without manual copying.
+             |    ROOTFS_DIRS=""
+             |    if [[ -d "${"$"}PREFIX/var/lib/proot-distro/installed-rootfs" ]]; then
+             |      ROOTFS_DIRS="${"$"}ROOTFS_DIRS ${"$"}PREFIX/var/lib/proot-distro/installed-rootfs/*/"
+             |    fi
+             |    # Conventional non-proot-distro installs (Andronix and co).
+             |    for d in "${"$"}HOME/ubuntu" "${"$"}HOME/ubuntu-fs" "${"$"}HOME/.termux/ubuntu"; do
+             |      if [[ -d "${"$"}d/usr" ]]; then ROOTFS_DIRS="${"$"}ROOTFS_DIRS ${"$"}d/"; fi
+             |    done
+             |    FOUND=0
+             |    for rootfs in ${"$"}ROOTFS_DIRS; do
+             |      [[ -d "${"$"}rootfs/usr" ]] || continue
+             |      FOUND=1
+             |      dist="$(basename "${"$"}rootfs")"
+             |      certdir="${"$"}rootfs/usr/local/share/ca-certificates"
+             |      mkdir -p "${"$"}certdir" 2>/dev/null
+             |      if cp "${"$"}CA_PEM" "${"$"}certdir/network-proxy-ca.crt" 2>/dev/null; then
+             |        echo "CA installed into proot distro: ${"$"}dist"
+             |      else
+             |        echo "CA copy failed for ${"$"}dist (storage permission?) - copy ${"$"}CA_PEM there manually"
+             |        continue
+             |      fi
+             |      if command -v proot-distro >/dev/null 2>&1 && [[ "${"$"}rootfs" == "${"$"}PREFIX"* ]]; then
+             |        if proot-distro login "${"$"}dist" -- update-ca-certificates 2>/dev/null; then
+             |          echo "CA store updated inside ${"$"}dist"
+             |        else
+             |          echo "update-ca-certificates skipped inside ${"$"}dist - run it there manually once"
+             |        fi
+             |      else
+             |        echo "non-proot-distro rootfs ${"$"}dist: run update-ca-certificates inside it once"
+             |      fi
+             |    done
+             |    if [[ "${"$"}FOUND" == "0" ]]; then
+             |      echo "No Ubuntu rootfs found - paste the app setup script inside Ubuntu too (env vars do not cross the proot boundary)"
+             |    else
+             |      echo "NOTE: proxy env vars do NOT cross into proot - paste the app setup script inside each Ubuntu distro as well"
+             |    fi
              |  fi
              |  # NOTE: persistent CA exports are NOT appended here anymore -
              |  # they already live in the above-guard managed block (bashrc
