@@ -100,37 +100,65 @@ object CredentialVault {
 
     fun exportBackup(context: Context, password: String): String {
         val raw = load(context) ?: throw IllegalStateException("vault empty, nothing to export")
+        val blob = encryptBackup(raw, password)
+        ProxyMetrics.event("Vault: backup exported (password-wrapped)")
+        return blob
+    }
+
+    /**
+     * Wrap [vaultJson] as `npbk1:salt:iv:ciphertext`. Context-free so the
+     * format is unit-tested without a device/Keystore. Uses java.util.Base64
+     * (minSdk 26) — byte-identical to the android.util Base64.NO_WRAP output
+     * this format shipped with, so old backups still import.
+     */
+    fun encryptBackup(vaultJson: String, password: String): String {
         val salt = ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }
         val key = pbkdf2(password, salt)
         val c = Cipher.getInstance("AES/GCM/NoPadding")
         c.init(Cipher.ENCRYPT_MODE, key)
-        val ct = c.doFinal(raw.toByteArray(Charsets.UTF_8))
-        val out = "npbk1:" + Base64.encodeToString(salt, Base64.NO_WRAP) + ":" +
-            Base64.encodeToString(c.iv, Base64.NO_WRAP) + ":" +
-            Base64.encodeToString(ct, Base64.NO_WRAP)
-        ProxyMetrics.event("Vault: backup exported (password-wrapped)")
-        return out
+        val ct = c.doFinal(vaultJson.toByteArray(Charsets.UTF_8))
+        val enc = java.util.Base64.getEncoder()
+        return "npbk1:" + enc.encodeToString(salt) + ":" +
+            enc.encodeToString(c.iv) + ":" + enc.encodeToString(ct)
     }
 
-    fun importBackup(context: Context, backup: String, password: String) {
-        val parts = backup.trim().split(":")
-        require(parts.size == 4 && parts[0] == "npbk1") { "not a nanoproxy backup" }
-        val key = pbkdf2(password, Base64.decode(parts[1], Base64.NO_WRAP))
+    /**
+     * Unwrap a backup blob. Tolerates a UTF-8 BOM, CRLF, line-wrapped
+     * base64 and surrounding whitespace (files round-tripped through
+     * editors/Windows/mail). Wrong password and tampering both fail here
+     * with one clear message.
+     */
+    fun decryptBackup(blob: String, password: String): String {
+        val clean = blob.trim().removePrefix("\uFEFF").trim()
+        val parts = clean.split(":")
+        require(parts.size == 4 && parts[0] == "npbk1") { "not a network-proxy backup" }
+        val dec = java.util.Base64.getMimeDecoder()
+        val key = pbkdf2(password, dec.decode(parts[1]))
         val c = Cipher.getInstance("AES/GCM/NoPadding")
         c.init(
             Cipher.DECRYPT_MODE, key,
-            GCMParameterSpec(128, Base64.decode(parts[2], Base64.NO_WRAP))
+            GCMParameterSpec(128, dec.decode(parts[2]))
         )
-        val plain = try {
-            c.doFinal(Base64.decode(parts[3], Base64.NO_WRAP)).toString(Charsets.UTF_8)
+        return try {
+            c.doFinal(dec.decode(parts[3])).toString(Charsets.UTF_8)
         } catch (e: Exception) {
-            throw IllegalArgumentException("wrong password or corrupt backup", e)
+            throw IllegalArgumentException("wrong password (or the file is damaged)", e)
         }
+    }
+
+    fun importBackup(context: Context, backup: String, password: String) {
+        val plain = decryptBackup(backup, password)
         // Validate shape before sealing: must be our provider-store JSON.
         ProviderStore.fromJson(plain)
         save(context, plain)
         ProxyMetrics.event("Vault: backup imported")
     }
+
+    /** Filenames this app writes into Downloads (unit-tested filter). */
+    fun isBackupName(name: String): Boolean =
+        name.startsWith(BACKUP_PREFIX) && name.endsWith(".txt")
+
+    const val BACKUP_PREFIX = "nanogatekeeper-backup-"
 
     private fun pbkdf2(password: String, salt: ByteArray): SecretKey {
         val spec = javax.crypto.spec.PBEKeySpec(password.toCharArray(), salt, PBKDF2_ROUNDS, 256)
