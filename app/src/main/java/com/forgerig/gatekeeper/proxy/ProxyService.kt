@@ -7,12 +7,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.SharedPreferences
 import android.net.wifi.WifiManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import androidx.preference.PreferenceManager
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -52,6 +54,8 @@ class ProxyService : Service() {
     private var statsCallback: ((Int, Long, Int, Int) -> Unit)? = null
     private var stateCallback: ((Boolean, String?) -> Unit)? = null
 
+    private var nvidiaApiKey: String = ""
+
     private var wifiLock: WifiManager.WifiLock? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
@@ -61,6 +65,8 @@ class ProxyService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        val sharedPref = PreferenceManager.getDefaultSharedPreferences(this)
+        nvidiaApiKey = sharedPref.getString("nvidia_api_key", "") ?: ""
         createNotificationChannel()
     }
 
@@ -81,6 +87,12 @@ class ProxyService : Service() {
         }
         port = intent?.getIntExtra("port", 8080) ?: 8080
         metricsEnabled = intent?.getBooleanExtra("metricsEnabled", true) ?: true
+        val apiKey = intent?.getStringExtra("nvidiaApiKey")
+        if (!apiKey.isNullOrBlank()) {
+            nvidiaApiKey = apiKey
+            val sharedPref = PreferenceManager.getDefaultSharedPreferences(this)
+            sharedPref.edit().putString("nvidia_api_key", apiKey).apply()
+        }
 
         if (running.get() == 1) {
             stopProxy()

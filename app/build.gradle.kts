@@ -13,21 +13,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 1_000_001
-        // Human-readable: git short SHA like the parent forge-gatekeeper app.
-        // Prefers GITHUB_SHA in CI, falls back to local `git rev-parse`.
-        versionName = System.getenv("GITHUB_SHA")?.take(8)?.let { "1.0-$it" }
-            ?: run {
-                try {
-                    val proc = ProcessBuilder("git", "rev-parse", "--short=8", "HEAD")
-                        .redirectErrorStream(true)
-                        .start()
-                    val sha = proc.inputStream.bufferedReader().readText().trim()
-                    proc.waitFor()
-                    if (sha.matches(Regex("[0-9a-f]{8}"))) "1.0-$sha" else "1.0-dev"
-                } catch (_: Exception) {
-                    "1.0-dev"
-                }
-            }
+        versionName = "1.0.0"
     }
 
     buildTypes {
@@ -56,4 +42,5 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
+    implementation("androidx.preference:preference:1.2.0")
 }
