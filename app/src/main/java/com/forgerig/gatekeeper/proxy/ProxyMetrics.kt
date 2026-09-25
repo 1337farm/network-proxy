@@ -449,7 +449,10 @@ object ProxyMetrics {
             if (firstOutputMs == 0L) firstOutputMs = now
             tokenEventTimes.add(now to output)
             pruneTokenEvents(now)
-            sampleOutput(output, now)
+            // NOTE: rate-chart sampling is NOT fed here — usage totals
+            // arrive in the final chunk, so arrival-bucketing spikes.
+            // Call sites credit via sampleOutputSpread(requestId, …) with
+            // the request's active span instead (see relayTap/tap scans).
         }
     }
 
@@ -500,7 +503,11 @@ object ProxyMetrics {
     @Synchronized
     fun sampleOutput(count: Long, atMs: Long = System.currentTimeMillis()) {
         if (count <= 0) return
-        val sec = atMs / 1000
+        addToBucket(atMs / 1000, count)
+    }
+
+    private fun addToBucket(sec: Long, count: Long) {
+        if (count <= 0) return
         val last = rateBuckets.peekLast()
         if (last != null && last.first == sec) {
             rateBuckets.removeLast()
@@ -512,9 +519,55 @@ object ProxyMetrics {
     }
 
     /**
-     * Last [nSecs] per-second output counts, oldest-first, zero-filled for
-     * idle seconds (trailing). Pure shape: list size always == nSecs.
+     * Credit output tokens across the request's ACTIVE seconds (first to
+     * last) instead of the arrival second. Usage totals arrive in the
+     * final chunk, so arrival-bucketing fabricates spikes (2k tokens
+     * after a 40s think reads as 2000 tok/s instead of ~49 tok/s).
+     * Even split, remainder to the last bucket. Falls back to the
+     * arrival second when the request start is unknown.
      */
+    @Synchronized
+    fun sampleOutputSpread(requestId: String, count: Long, atMs: Long = System.currentTimeMillis()) {
+        if (count <= 0) return
+        val startMs = requestStartTimes[requestId] ?: run { sampleOutput(count, atMs); return }
+        val spanSecs = ((atMs - startMs) / 1000).toInt()
+        if (spanSecs <= 0) {
+            sampleOutput(count, atMs)
+            return
+        }
+        // Bound work and ring pressure; density stays honest for real spans.
+        val plan = spreadPlan(count, spanSecs)
+        val endSec = atMs / 1000
+        val base = endSec - plan.size + 1
+        plan.forEachIndexed { i, c -> addToBucket(base + i, c) }
+    }
+
+    /**
+     * Pure spread plan (oldest-first per-second shares): even split, the
+     * remainder spread one-per-bucket from the newest end.
+     */
+    fun spreadPlan(count: Long, spanSecs: Int, capped: Int = RATE_CHART_SECS): List<Long> {
+        if (count <= 0) return emptyList()
+        val n = spanSecs.coerceIn(1, capped)
+        val base = count / n
+        val rem = (count % n).toInt()
+        return List(n) { i -> base + if (i >= n - rem) 1 else 0 }
+    }
+
+    /**
+     * Single choke point for usage accounting: credits the token tallies
+     * AND the rate sampler together, so the two can never drift apart.
+     * [found] is the scanner quad (input, output, cacheRead, cacheWrite).
+     * [requestId] null = tally only (opaque paths with no request context).
+     */
+    @Synchronized
+    fun recordUsage(host: String, requestId: String?, found: LongArray) {
+        require(found.size == 4) { "usage quad must be (in, out, cacheR, cacheW)" }
+        addTokens(found[0], found[1], found[2], found[3], host)
+        if (requestId != null) {
+            sampleOutputSpread(requestId, found[1])
+        }
+    }
     @Synchronized
     fun rateHistory(nSecs: Int = RATE_CHART_SECS, atMs: Long = System.currentTimeMillis()): List<Long> {
         val n = nSecs.coerceIn(1, RATE_CHART_SECS)
