@@ -92,6 +92,12 @@ object CredentialVault {
     // ---- Portable backup: password-wrapped, Keystore-independent ----
     private const val PBKDF2_ROUNDS = 210_000
 
+    /** Timestamped filename for Downloads exports. Pure (unit-tested). */
+    fun backupFilename(nowMs: Long = System.currentTimeMillis()): String {
+        val fmt = java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US)
+        return "nanogatekeeper-backup-" + fmt.format(java.util.Date(nowMs)) + ".txt"
+    }
+
     fun exportBackup(context: Context, password: String): String {
         val raw = load(context) ?: throw IllegalStateException("vault empty, nothing to export")
         val salt = ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }

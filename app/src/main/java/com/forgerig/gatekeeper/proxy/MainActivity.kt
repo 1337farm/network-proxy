@@ -11,6 +11,7 @@ import android.view.View
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.ActivityResultLauncher
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModelProvider
@@ -29,6 +30,11 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var viewModel: ProxyViewModel
     private var setupScriptExpanded = false
+    /** SAF picker target: the paste field of the open import dialog. */
+    private var importPicker: ActivityResultLauncher<Intent>? = null
+    private var importBlobView: android.widget.EditText? = null
+    /** File text picked while the dialog was closed; pre-fills on reopen. */
+    private var pendingImportBlob: String? = null
     private val statsHandler = Handler(Looper.getMainLooper())
     private val statsPoller = object : Runnable {
         override fun run() {
@@ -43,6 +49,36 @@ class MainActivity : AppCompatActivity() {
 
         viewModel = ViewModelProvider(this)[ProxyViewModel::class.java]
         viewModel.attach(this)
+
+        // SAF import picker: no storage permission needed; fills the
+        // open import dialog's paste field with the chosen file's text.
+        importPicker = registerForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+        ) { res ->
+            if (res.resultCode == RESULT_OK) {
+                val uri = res.data?.data
+                if (uri == null) {
+                    Toast.makeText(this, "No file chosen", Toast.LENGTH_SHORT).show()
+                    return@registerForActivityResult
+                }
+                try {
+                    val text = contentResolver.openInputStream(uri)
+                        ?.bufferedReader()?.readText()?.trim() ?: ""
+                    if (!text.startsWith("npbk1:")) {
+                        Toast.makeText(this, "Not a vault backup (npbk1:…)", Toast.LENGTH_LONG).show()
+                        return@registerForActivityResult
+                    }
+                    importBlobView = null // dialog dismissed with Load-file tap
+                    // Stash + reopen pre-filled so the user just enters
+                    // their password and hits Import.
+                    pendingImportBlob = text
+                    showImportBackupDialog()
+                    Toast.makeText(this, "Backup loaded — enter password, tap Import", Toast.LENGTH_LONG).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Read failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
 
         val startStopButton = findViewById<MaterialButton>(R.id.startStopButton)
         val exportButton = findViewById<MaterialButton>(R.id.exportButton)
@@ -246,7 +282,7 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    /** Export dialog: password → share password-wrapped backup text. */
+    /** Export dialog: password → save file to Downloads (+ optional share). */
     private fun showExportBackupDialog() {
         if (!CredentialVault.exists(this)) {
             Toast.makeText(this, "Vault empty — nothing to export", Toast.LENGTH_SHORT).show()
@@ -261,7 +297,16 @@ class MainActivity : AppCompatActivity() {
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Export encrypted backup")
             .setView(layout)
-            .setPositiveButton("Share") { _, _ ->
+            .setPositiveButton("Save to Downloads") { _, _ ->
+                try {
+                    val backup = CredentialVault.exportBackup(this, pw.text.toString())
+                    val where = saveBackupToDownloads(CredentialVault.backupFilename(), backup)
+                    Toast.makeText(this, "Saved: $where", Toast.LENGTH_LONG).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Export failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNeutralButton("Share") { _, _ ->
                 try {
                     val backup = CredentialVault.exportBackup(this, pw.text.toString())
                     val share = Intent(Intent.ACTION_SEND).apply {
@@ -277,10 +322,44 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    /** Import dialog: paste backup + password → validate → seal. */
+    /**
+     * Write [content] as [name] into Downloads. MediaStore on API 29+
+     * (no permission); legacy direct write below that (needs
+     * WRITE_EXTERNAL_STORAGE). Returns the display path for the toast.
+     */
+    private fun saveBackupToDownloads(name: String, content: String): String {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.Downloads.DISPLAY_NAME, name)
+                put(android.provider.MediaStore.Downloads.MIME_TYPE, "text/plain")
+                put(android.provider.MediaStore.Downloads.RELATIVE_PATH,
+                    android.os.Environment.DIRECTORY_DOWNLOADS)
+            }
+            val uri = contentResolver.insert(
+                android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values
+            ) ?: throw IllegalStateException("MediaStore refused the file")
+            contentResolver.openOutputStream(uri)?.use {
+                it.write(content.toByteArray(Charsets.UTF_8))
+            } ?: throw IllegalStateException("cannot open Downloads file")
+            return "Downloads/$name"
+        }
+        val dir = android.os.Environment.getExternalStoragePublicDirectory(
+            android.os.Environment.DIRECTORY_DOWNLOADS
+        )
+        val f = java.io.File(dir, name)
+        f.writeText(content)
+        return f.absolutePath
+    }
+
+    /** Import dialog: load backup file (or paste) + password → validate → seal. */
     private fun showImportBackupDialog() {
         val pw = textInput("Backup password", secret = true)
-        val blob = textInput("Paste backup (npbk1:…)")
+        val blob = textInput("Paste backup (npbk1:…) or Load file")
+        pendingImportBlob?.let {
+            blob.setText(it)
+            pendingImportBlob = null
+        }
+        importBlobView = blob
         val layout = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(48, 24, 48, 0)
@@ -299,8 +378,29 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this, "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
+            .setNeutralButton("Load file…") { _, _ ->
+                // Dialog buttons dismiss on tap: the picker result
+                // reopens this dialog pre-filled (see picker callback).
+                openBackupPicker()
+            }
             .setNegativeButton("Cancel", null)
+            .setOnDismissListener { if (importBlobView === blob) importBlobView = null }
             .show()
+    }
+
+    /** SAF file picker for backup files (no storage permission needed). */
+    private fun openBackupPicker() {
+        try {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "text/plain"
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("text/plain", "*/*"))
+            }
+            importPicker?.launch(intent)
+                ?: Toast.makeText(this, "Picker unavailable", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Picker failed: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     /** Share the MITM CA cert so the setup script can trust it. */

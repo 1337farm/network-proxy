@@ -64,6 +64,35 @@ class StatsHealthTest {
     }
 
     @Test
+    fun spreadPlanIsEvenRemainderNewestEnd() {
+        // the user's case: 2k tokens after a 40s think → ~49/s, not a spike
+        val plan = ProxyMetrics.spreadPlan(2000, 41)
+        assertEquals(41, plan.size)
+        assertEquals(2000L, plan.sum())
+        assertEquals(32, plan.count { it == 49L })
+        assertEquals(9, plan.count { it == 48L })
+        assertEquals(listOf(3L, 3L, 4L), ProxyMetrics.spreadPlan(10, 3))
+        assertEquals(listOf(7L), ProxyMetrics.spreadPlan(7, 0))
+        assertEquals(emptyList<Long>(), ProxyMetrics.spreadPlan(0, 10))
+        assertEquals(ProxyMetrics.RATE_CHART_SECS, ProxyMetrics.spreadPlan(600, 9999).size)
+    }
+
+    @Test
+    fun recordUsageCreditsTallyAndSamplerTogether() {
+        ProxyMetrics.resetTallies()
+        // unknown request → arrival-second fallback; last bucket holds it
+        ProxyMetrics.recordUsage("h", "nope-missing", longArrayOf(100, 7, 0, 0))
+        assertEquals(100L, ProxyMetrics.inputTokens)
+        assertEquals(7L, ProxyMetrics.outputTokens)
+        assertEquals(listOf(7L), ProxyMetrics.rateHistory(1))
+        // null request → tally only, sampler untouched
+        ProxyMetrics.recordUsage("h", null, longArrayOf(10, 5, 0, 0))
+        assertEquals(110L, ProxyMetrics.inputTokens)
+        assertEquals(12L, ProxyMetrics.outputTokens)
+        assertEquals(listOf(7L), ProxyMetrics.rateHistory(1))
+    }
+
+    @Test
     fun healthRestartDecision() {
         assertFalse(ProxyService.healthNeedsRestart(0))
         assertFalse(ProxyService.healthNeedsRestart(2))

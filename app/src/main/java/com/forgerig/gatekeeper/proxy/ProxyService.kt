@@ -510,7 +510,9 @@ class ProxyService : Service() {
                             if (it.size() > 0) {
                                 val found = ProxyMetrics.scanUsage(it.toString("UTF-8"))
                                 if (found[0] + found[1] + found[2] + found[3] > 0) {
-                                    ProxyMetrics.addTokens(found[0], found[1], found[2], found[3], host)
+                                    // One call credits tallies + rate sampler
+                                    // together (see recordUsage).
+                                    ProxyMetrics.recordUsage(host, requestId, found)
                                     ProxyMetrics.event(
                                         "Tokens $host in=${found[0]} out=${found[1]} " +
                                             "cacheR=${found[2]} cacheW=${found[3]}"
@@ -727,7 +729,7 @@ class ProxyService : Service() {
             // scanner can't read — see scanTapBytesForClose).
             val liveUsage = ProxyMetrics.StreamingUsage()
             val t1 = Thread { relayTap(cIn, uOut, upBytes, null, 0) }
-            val t2 = Thread { relayTap(uIn, cOut, downBytes, tap, tapCap, liveUsage, host) }
+            val t2 = Thread { relayTap(uIn, cOut, downBytes, tap, tapCap, liveUsage, host, requestId) }
             t1.start(); t2.start()
             t1.join(); t2.join()
             // NOTE: bytesOut is fed per-chunk inside relay()/relayTap();
@@ -741,7 +743,7 @@ class ProxyService : Service() {
                 // picks up gzip/deflate bodies. Never recount plaintext.
                 val found = ProxyMetrics.scanTapBytesForClose(tap.toByteArray())
                 if (found[0] + found[1] + found[2] + found[3] > 0) {
-                    ProxyMetrics.addTokens(found[0], found[1], found[2], found[3], host)
+                    ProxyMetrics.recordUsage(host, requestId, found)
                     ProxyMetrics.event(
                         "Tokens $host in=${found[0]} out=${found[1]} " +
                             "cacheR=${found[2]} cacheW=${found[3]} (mitm encoded)"
@@ -753,7 +755,7 @@ class ProxyService : Service() {
             // live counts and the encoded-body fallback above.
             val tail = liveUsage.flush()
             if (tail[0] + tail[1] + tail[2] + tail[3] > 0) {
-                ProxyMetrics.addTokens(tail[0], tail[1], tail[2], tail[3], host)
+                ProxyMetrics.recordUsage(host, requestId, tail)
                 ProxyMetrics.event(
                     "Tokens $host in=${tail[0]} out=${tail[1]} " +
                         "cacheR=${tail[2]} cacheW=${tail[3]} (live tail)"
@@ -783,7 +785,8 @@ class ProxyService : Service() {
         tap: java.io.ByteArrayOutputStream?,
         tapCap: Int,
         liveUsage: ProxyMetrics.StreamingUsage? = null,
-        usageHost: String = ""
+        usageHost: String = "",
+        requestId: String? = null
     ) {
         try {
             val buf = ByteArray(64 * 1024)
@@ -800,7 +803,7 @@ class ProxyService : Service() {
                 if (liveUsage != null) {
                     val found = liveUsage.feed(buf, n)
                     if (found[0] + found[1] + found[2] + found[3] > 0) {
-                        ProxyMetrics.addTokens(found[0], found[1], found[2], found[3], usageHost)
+                        ProxyMetrics.recordUsage(usageHost, requestId, found)
                         ProxyMetrics.event(
                             "Tokens $usageHost in=${found[0]} out=${found[1]} " +
                                 "cacheR=${found[2]} cacheW=${found[3]} (live)"
