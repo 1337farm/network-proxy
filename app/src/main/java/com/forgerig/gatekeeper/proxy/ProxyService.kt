@@ -782,18 +782,25 @@ class ProxyService : Service() {
             // request usually carry the top-level "model" field; feeds
             // per-model tallies for a tunnel whose body stays opaque.
             val upModel = java.util.concurrent.atomic.AtomicReference("")
-            val t1 = Thread { relayTap(cIn, uOut, upBytes, null, 0, modelRef = upModel) }
+            // Request-head tap (256KB cap): first user turn feeds the
+            // session conversation title. Best-effort — huge bodies
+            // truncate and fall back to provider/host display.
+            val reqTap = java.io.ByteArrayOutputStream()
+            val reqTapCap = 256 * 1024
+            val t1 = Thread { relayTap(cIn, uOut, upBytes, reqTap, reqTapCap, modelRef = upModel) }
             val t2 = Thread { relayTap(uIn, cOut, downBytes, tap, tapCap, liveUsage, host, requestId, upModel, false) }
             t1.start(); t2.start()
             t1.join(); t2.join()
-            // Backfill the sniffed upstream model into the session note
-            // (blank at CONNECT time — tunnel bodies stay opaque otherwise).
+            // Backfill the sniffed upstream model + conversation title
+            // into the session note (both blank at CONNECT time).
             val sniffed = upModel.get()
-            if (sniffed.isNotBlank()) {
+            val reqTitle = SessionTracker.titleOf(reqTap.toByteArray())
+            if (sniffed.isNotBlank() || reqTitle.isNotBlank()) {
                 val st = ProviderBroker.store(this)
                 val mp = ProviderStore.matchHost(st, host)
                 SessionTracker.note(
-                    sessionId, mp?.id ?: "", "(client key)", sniffed, host.lowercase()
+                    sessionId, mp?.id ?: "", "(client key)", sniffed, host.lowercase(),
+                    title = reqTitle
                 )
             }
             // NOTE: bytesOut is fed per-chunk inside relay()/relayTap();

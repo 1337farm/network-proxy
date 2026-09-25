@@ -108,4 +108,19 @@ class SetupScriptTest {
         assertTrue(step.contains("idempotent skip"))
         assertTrue(step.contains("raise SystemExit(0)"))
     }
+
+    @Test
+    fun termuxProotFanoutSection() {
+        // Pasted in Termux, the script must detect the environment and
+        // push the CA into every Ubuntu proot distro (plus itself).
+        val script = rendered()
+        assertTrue(script.contains("IS_TERMUX=0"))
+        assertTrue(script.contains("uname -o"))
+        assertTrue(script.contains("ID=ubuntu"))
+        assertTrue(script.contains("installed-rootfs"))
+        assertTrue(script.contains("network-proxy-ca.crt"))
+        assertTrue(script.contains("update-ca-certificates"))
+        // Env vars do not cross proot: the script must say so.
+        assertTrue(script.contains("do NOT cross") || script.contains("do not cross"))
+    }
 }

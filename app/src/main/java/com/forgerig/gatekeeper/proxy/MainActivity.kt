@@ -543,43 +543,48 @@ class MainActivity : AppCompatActivity() {
         val emerald = getColor(R.color.status_running)
         val track = getColor(R.color.outline)
         val violet = getColor(R.color.title_violet)
-        // Aggregate per host: the chart is the high-level view, the table splits.
-        val byHost = rows.groupBy { it.host }.mapValues { (_, rs) ->
-            Triple(
-                rs.sumOf { it.inTokens },
-                rs.sumOf { it.cacheRead },
-                rs.sumOf { it.inTokens + it.outTokens }
-            )
-        }.toList().sortedByDescending { it.second.third }.take(5)
-        for ((host, agg) in byHost) {
-            chart.addView(chartRow(host, agg.second, agg.first, d, emerald, track, violet, bold = false))
+        val hint = getColor(R.color.hint_text)
+        // One row per (host, model) like the table — the exact model is
+        // always visible; hostnames wrap full-length, never truncated.
+        for (r in rows) {
+            chart.addView(chartRow(r.host, r.model, r.cacheRead, r.inTokens, d, emerald, track, violet, hint, bold = false))
         }
         chart.addView(
             chartRow(
-                "TOTAL", ProxyMetrics.cacheReadTokens, ProxyMetrics.inputTokens,
-                d, emerald, track, violet, bold = true
+                "TOTAL", "", ProxyMetrics.cacheReadTokens, ProxyMetrics.inputTokens,
+                d, emerald, track, violet, hint, bold = true
             )
         )
     }
 
     private fun chartRow(
-        host: String, cacheRead: Long, input: Long, d: Float,
-        emerald: Int, track: Int, violet: Int, bold: Boolean
+        host: String, model: String, cacheRead: Long, input: Long, d: Float,
+        emerald: Int, track: Int, violet: Int, hint: Int, bold: Boolean
     ): android.widget.LinearLayout {
         val col = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(0, (4 * d).toInt(), 0, (4 * d).toInt())
         }
-        val label = TextView(this).apply {
-            text = "$host  ${StatsFormat.cachePct(cacheRead, input)} cached"
+        // Full hostname, wraps freely — never truncated. Exact model on
+        // a dimmed second line (blank for unattributed tunnels).
+        val hostLabel = TextView(this).apply {
+            text = host
             textSize = 12f
             typeface = android.graphics.Typeface.MONOSPACE
             if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
             setTextColor(violet)
-            maxLines = 1
+        }
+        col.addView(hostLabel)
+        val modelLabel = TextView(this).apply {
+            text = if (model.isNotBlank()) "$model  ${StatsFormat.cachePct(cacheRead, input)} cached"
+            else "${StatsFormat.cachePct(cacheRead, input)} cached"
+            textSize = 12f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextColor(hint)
+            maxLines = 2
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
-        col.addView(label)
+        col.addView(modelLabel)
         val bar = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.HORIZONTAL
             weightSum = 1f
