@@ -251,6 +251,10 @@ class ProviderStore private constructor() {
          * Longest baseUrl-prefix match for [targetUrl]. Path-aware so
          * gateway sub-endpoints (e.g. Zen /messages vs root) resolve to the
          * right credential style.
+         *
+         * NOTE: needs a full API URL. For bare SNI/authority hosts at
+         * CONNECT time use [matchHost] (suffix match) instead — a bare
+         * "https://opencode.ai" never prefix-matches ".../zen/v1".
          */
         fun matchProvider(store: ProviderStore, targetUrl: String): Provider? {
             var best: Provider? = null
@@ -264,6 +268,24 @@ class ProviderStore private constructor() {
                         best = p
                         bestLen = base.length
                     }
+                }
+            }
+            return best
+        }
+
+        /**
+         * Provider whose base URL host matches a bare SNI/authority host
+         * (CONNECT-time attribution). Longest base-host wins so gateway
+         * sub-endpoints prefer the most specific provider entry.
+         */
+        fun matchHost(store: ProviderStore, host: String): Provider? {
+            var best: Provider? = null
+            var bestLen = -1
+            for (p in store.providers.values) {
+                val b = LlmPolicy.extractHost(p.baseUrl)
+                if (b.isNotEmpty() && LlmPolicy.matchesAny(host, setOf(b)) && b.length > bestLen) {
+                    best = p
+                    bestLen = b.length
                 }
             }
             return best

@@ -1,9 +1,12 @@
 package com.forgerig.gatekeeper.proxy
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -94,17 +97,13 @@ class MainActivity : AppCompatActivity() {
         val cleanupScriptHeader = findViewById<android.view.View>(R.id.cleanupScriptHeader)
         var cleanupScriptExpanded = false
         val portInput = findViewById<TextInputEditText>(R.id.portInput)
-        val metricsCheck = findViewById<MaterialCheckBox>(R.id.metricsCheck)
-        val mitmCheck = findViewById<MaterialCheckBox>(R.id.mitmCheck)
-        // Layout defaults Decrypt-HTTPS to checked; the service pre-loads
-        // (and if needed, generates) the CA off the UI thread on start —
-        // no main-thread crypto here.
+        // Metrics + Decrypt-HTTPS are always on (no toggles by design).
 
         // Auto-start: ensure the proxy is running on app start unless the
         // user explicitly stopped it (Stop persists the opt-out).
         if (savedInstanceState == null && prefs().getBoolean(KEY_SHOULD_RUN, true)) {
             val p = portInput.text.toString().toIntOrNull() ?: 3128
-            viewModel.ensureRunning(p, metricsCheck.isChecked, mitmCheck.isChecked)
+            viewModel.ensureRunning(p, metricsEnabled = true, mitmEnabled = true)
         }
 
         val refreshScript = {
@@ -152,23 +151,20 @@ class MainActivity : AppCompatActivity() {
 
         startStopButton.setOnClickListener {
             val port = portInput.text.toString().toIntOrNull() ?: 3128
-            val metricsEnabled = metricsCheck.isChecked
-            val mitmEnabled = mitmCheck.isChecked
-            prefs().edit().putBoolean(KEY_MITM, mitmEnabled).apply()
 
             if (viewModel.isRunning.value == true) {
                 prefs().edit().putBoolean(KEY_SHOULD_RUN, false).apply()
                 viewModel.stopProxy()
             } else {
                 prefs().edit().putBoolean(KEY_SHOULD_RUN, true).apply()
-                if (mitmEnabled && !MitmCa.caCertFile(this).exists()) {
+                if (!MitmCa.caCertFile(this).exists()) {
                     Toast.makeText(
                         this,
                         "MITM CA unavailable — starting opaque",
                         Toast.LENGTH_LONG
                     ).show()
                 }
-                viewModel.startProxy(port, metricsEnabled, mitmEnabled)
+                viewModel.startProxy(port, metricsEnabled = true, mitmEnabled = true)
             }
             refreshScript()
         }
@@ -451,7 +447,21 @@ class MainActivity : AppCompatActivity() {
             else "Retries: $retries (${snap.scenarioCounts.entries.joinToString { "${it.key}=${it.value}" }})"
         renderTokensTable()
         renderCacheChart()
-        findViewById<TokenRateView>(R.id.rateChart)?.setSamples(ProxyMetrics.rateHistory())
+        // Scrollable rate window: the view holds its pan offset; each
+        // poll re-queries the window ending there (0 = live edge).
+        // While a pan gesture is active the view owns its frame — pushing
+        // poll data mid-drag would snap the bars out from under the finger.
+        findViewById<TokenRateView>(R.id.rateChart)?.let { chart ->
+            if (!chart.isInteracting) {
+                chart.setSamples(
+                    ProxyMetrics.rateHistory(
+                        TokenRateView.WINDOW_SECS,
+                        System.currentTimeMillis() - chart.offsetSec * 1000
+                    )
+                )
+            }
+        }
+        renderSessionsList(svc)
         val hosts = ProxyMetrics.hostSummary(3)
         findViewById<TextView>(R.id.hostsText)?.text =
             if (hosts.isEmpty()) ""
@@ -483,13 +493,15 @@ class MainActivity : AppCompatActivity() {
         }
         table.visibility = View.VISIBLE
         val violet = getColor(R.color.title_violet)
+        val hint = getColor(R.color.hint_text)
         table.addView(tableRow(listOf("host", "in", "out", "cacheR", "cacheW"), header = true, violet = violet))
         table.addView(dividerRow())
         for (r in rows) {
             table.addView(
                 tableRow(
                     listOf(
-                        r.host, StatsFormat.humanTokens(r.inTokens),
+                        hostModelCell(r.host, r.model, hint),
+                        StatsFormat.humanTokens(r.inTokens),
                         StatsFormat.humanTokens(r.outTokens),
                         StatsFormat.humanTokens(r.cacheRead),
                         StatsFormat.humanTokens(r.cacheWrite)
@@ -512,12 +524,11 @@ class MainActivity : AppCompatActivity() {
         footer?.text = "@ $tps tok/s (avg $avg)"
     }
 
-    /** Cache-efficiency bars: per-host cache-read share (the north-star
-     *  metric) plus a TOTAL row. Emerald fill vs outline track. */
+    /** Cache-efficiency bars per host (models aggregated) plus TOTAL. */
     private fun renderCacheChart() {
         val chart = findViewById<android.widget.LinearLayout>(R.id.cacheChart) ?: return
         chart.removeAllViews()
-        val rows = ProxyMetrics.tokenSummary(5)
+        val rows = ProxyMetrics.tokenSummary(8)
         if (rows.isEmpty()) {
             chart.visibility = View.GONE
             return
@@ -527,8 +538,16 @@ class MainActivity : AppCompatActivity() {
         val emerald = getColor(R.color.status_running)
         val track = getColor(R.color.outline)
         val violet = getColor(R.color.title_violet)
-        for (r in rows) {
-            chart.addView(chartRow(r.host, r.cacheRead, r.inTokens, d, emerald, track, violet, bold = false))
+        // Aggregate per host: the chart is the high-level view, the table splits.
+        val byHost = rows.groupBy { it.host }.mapValues { (_, rs) ->
+            Triple(
+                rs.sumOf { it.inTokens },
+                rs.sumOf { it.cacheRead },
+                rs.sumOf { it.inTokens + it.outTokens }
+            )
+        }.toList().sortedByDescending { it.second.third }.take(5)
+        for ((host, agg) in byHost) {
+            chart.addView(chartRow(host, agg.second, agg.first, d, emerald, track, violet, bold = false))
         }
         chart.addView(
             chartRow(
@@ -579,6 +598,52 @@ class MainActivity : AppCompatActivity() {
         return col
     }
 
+    /** Key-backed sessions: title, key label @ provider/model, age,
+     *  plus the latest routing event (429/roll/spill). */
+    private fun renderSessionsList(svc: ProxyService?) {
+        val list = findViewById<android.widget.LinearLayout>(R.id.sessionsList) ?: return
+        list.removeAllViews()
+        val sessions = svc?.sessionDetails()?.take(20) ?: emptyList()
+        if (sessions.isEmpty()) {
+            list.visibility = View.GONE
+            return
+        }
+        list.visibility = View.VISIBLE
+        val now = System.currentTimeMillis()
+        for (s in sessions) {
+            val title = TextView(this).apply {
+                text = s.title.ifBlank { "${s.providerId.ifBlank { s.host }}${s.model.ifBlank { "" }.let { if (it.isNotEmpty()) "/$it" else "" }}" }
+                textSize = 12f
+                typeface = android.graphics.Typeface.MONOSPACE
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            list.addView(title)
+            val modelBit = if (s.model.isNotBlank()) "/${s.model}" else ""
+            val detail = StringBuilder()
+                .append("${s.keyLabel} @ ${s.providerId}$modelBit · ${StatsFormat.humanAge(s.startedMs, now)}")
+            if (s.lastEvent.isNotBlank()) {
+                detail.append("\n↳ ${s.lastEvent} · ${StatsFormat.humanAge(s.lastEventMs, now)} ago")
+            }
+            val sub = TextView(this).apply {
+                text = detail.toString()
+                textSize = 11f
+                typeface = android.graphics.Typeface.MONOSPACE
+                setTextColor(getColor(R.color.hint_text))
+            }
+            list.addView(sub)
+        }
+        val total = svc?.sessionDetails()?.size ?: 0
+        if (total > sessions.size) {
+            val more = TextView(this).apply {
+                text = "+${total - sessions.size} more"
+                textSize = 12f
+                setTextColor(getColor(R.color.hint_text))
+            }
+            list.addView(more)
+        }
+    }
     /** Hairline rule between table sections (header / TOTAL). */
     private fun dividerRow(): android.widget.TableRow {
         val row = android.widget.TableRow(this)
@@ -601,7 +666,24 @@ class MainActivity : AppCompatActivity() {
         return row
     }
 
-    private fun tableRow(cells: List<String>, header: Boolean = false, bold: Boolean = false, violet: Int = 0): android.widget.TableRow {
+    /**
+     * Host cell with the ACTUAL upstream model on a dimmed second line
+     * (post any spillover rewrite — never the harness-requested id).
+     * Blank model renders host only (unattributed tunnels).
+     */
+    private fun hostModelCell(host: String, model: String, hint: Int): CharSequence {
+        if (model.isBlank()) return host
+        val text = "$host\n$model"
+        return android.text.SpannableString(text).apply {
+            setSpan(
+                android.text.style.ForegroundColorSpan(hint),
+                host.length + 1, text.length,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+    }
+
+    private fun tableRow(cells: List<CharSequence>, header: Boolean = false, bold: Boolean = false, violet: Int = 0): android.widget.TableRow {
         val row = android.widget.TableRow(this)
         val d = resources.displayMetrics.density
         val vPad = (6 * d).toInt()

@@ -432,13 +432,16 @@ object ProxyMetrics {
     }
 
     @Synchronized
-    fun addTokens(input: Long, output: Long, cacheRead: Long, cacheWrite: Long, host: String = "") {
+    fun addTokens(
+        input: Long, output: Long, cacheRead: Long, cacheWrite: Long,
+        host: String = "", model: String = ""
+    ) {
         inputTokens += input
         outputTokens += output
         cacheReadTokens += cacheRead
         cacheWriteTokens += cacheWrite
         if (host.isNotBlank()) {
-            val t = tokenTallies.getOrPut(host) { TokenTally() }
+            val t = tokenTallies.getOrPut(tallyKey(host, model)) { TokenTally() }
             t.inTokens += input
             t.outTokens += output
             t.cacheRead += cacheRead
@@ -447,38 +450,24 @@ object ProxyMetrics {
         if (output > 0) {
             val now = System.currentTimeMillis()
             if (firstOutputMs == 0L) firstOutputMs = now
-            tokenEventTimes.add(now to output)
-            pruneTokenEvents(now)
-            // NOTE: rate-chart sampling is NOT fed here — usage totals
-            // arrive in the final chunk, so arrival-bucketing spikes.
-            // Call sites credit via sampleOutputSpread(requestId, …) with
-            // the request's active span instead (see relayTap/tap scans).
+            // NOTE: no arrival-bucketing here — usage totals land in the
+            // final chunk and would spike. Rate credit flows exclusively
+            // through sampleOutputSpread (active-span attribution).
         }
     }
 
-    // ---- Output tokens/sec (trailing window over completion tokens) ----
-    private val tokenEventTimes = ConcurrentLinkedQueue<Pair<Long, Long>>()
+    // ---- Output tokens/sec, from the SAME spread buckets the chart
+    // draws — the number and the chart cannot disagree. ----
     private const val TPS_WINDOW_MS = 30_000L
     /** Set on the first counted output token; session average hangs off it. */
     @Volatile private var firstOutputMs: Long = 0L
-
-    private fun pruneTokenEvents(now: Long, windowMs: Long = TPS_WINDOW_MS) {
-        while (true) {
-            val head = tokenEventTimes.peek() ?: break
-            if (now - head.first <= windowMs) break
-            tokenEventTimes.poll()
-        }
-    }
 
     /** Output tokens per second over the trailing window (default 30s). */
     @Synchronized
     fun outputTokensPerSecond(windowMs: Long = TPS_WINDOW_MS): Double {
         if (windowMs <= 0) return 0.0
-        val now = System.currentTimeMillis()
-        pruneTokenEvents(now, windowMs)
-        var sum = 0L
-        for ((_, n) in tokenEventTimes) sum += n
-        return sum.toDouble() / (windowMs / 1000.0)
+        val n = (windowMs / 1000).toInt().coerceIn(1, RATE_HISTORY_SECS)
+        return rateHistory(n).sum().toDouble() / n
     }
 
     /**
@@ -498,6 +487,10 @@ object ProxyMetrics {
     /** Ring of (second-epoch → output tokens); capped, oldest evicted. */
     private val rateBuckets = java.util.ArrayDeque<Pair<Long, Long>>()
     const val RATE_CHART_SECS = 60
+    /** Full retention behind the scrollable chart (1h, ~60KB). */
+    const val RATE_HISTORY_SECS = 3600
+    /** Default visible window of the scrollable chart. */
+    const val RATE_WINDOW_SECS = 120
 
     /** Fold output tokens into the current second-bucket (test seam: [atMs]). */
     @Synchronized
@@ -515,7 +508,7 @@ object ProxyMetrics {
         } else {
             rateBuckets.addLast(sec to count)
         }
-        while (rateBuckets.size > RATE_CHART_SECS) rateBuckets.removeFirst()
+        while (rateBuckets.size > RATE_HISTORY_SECS) rateBuckets.removeFirst()
     }
 
     /**
@@ -546,7 +539,7 @@ object ProxyMetrics {
      * Pure spread plan (oldest-first per-second shares): even split, the
      * remainder spread one-per-bucket from the newest end.
      */
-    fun spreadPlan(count: Long, spanSecs: Int, capped: Int = RATE_CHART_SECS): List<Long> {
+    fun spreadPlan(count: Long, spanSecs: Int, capped: Int = RATE_HISTORY_SECS): List<Long> {
         if (count <= 0) return emptyList()
         val n = spanSecs.coerceIn(1, capped)
         val base = count / n
@@ -556,21 +549,22 @@ object ProxyMetrics {
 
     /**
      * Single choke point for usage accounting: credits the token tallies
-     * AND the rate sampler together, so the two can never drift apart.
-     * [found] is the scanner quad (input, output, cacheRead, cacheWrite).
-     * [requestId] null = tally only (opaque paths with no request context).
+     * (split by host AND model) AND the rate sampler together, so the
+     * displays can never drift apart. [found] is the scanner quad
+     * (input, output, cacheRead, cacheWrite). [requestId] null = tally
+     * only (opaque paths with no request context).
      */
     @Synchronized
-    fun recordUsage(host: String, requestId: String?, found: LongArray) {
+    fun recordUsage(host: String, model: String, requestId: String?, found: LongArray) {
         require(found.size == 4) { "usage quad must be (in, out, cacheR, cacheW)" }
-        addTokens(found[0], found[1], found[2], found[3], host)
+        addTokens(found[0], found[1], found[2], found[3], host, model)
         if (requestId != null) {
             sampleOutputSpread(requestId, found[1])
         }
     }
     @Synchronized
     fun rateHistory(nSecs: Int = RATE_CHART_SECS, atMs: Long = System.currentTimeMillis()): List<Long> {
-        val n = nSecs.coerceIn(1, RATE_CHART_SECS)
+        val n = nSecs.coerceIn(1, RATE_HISTORY_SECS)
         val nowSec = atMs / 1000
         val map = HashMap<Long, Long>(rateBuckets.size * 2)
         for ((s, c) in rateBuckets) map[s] = (map[s] ?: 0L) + c
@@ -581,8 +575,8 @@ object ProxyMetrics {
         hostTallies.entries.sortedByDescending { it.value.upBytes + it.value.downBytes }
             .take(top).map { Triple(it.key, it.value.upBytes, it.value.downBytes) }
 
-    // ---- Per-host token tallies (feeds the token table; globals above
-    // stay the totals row). Host is passed by every addTokens call site.
+    // ---- Per-(host, model) token tallies (feeds the token table;
+    // globals stay the totals row). Model "" = unattributed (tunnels).
     data class TokenTally(
         var inTokens: Long = 0,
         var outTokens: Long = 0,
@@ -594,8 +588,18 @@ object ProxyMetrics {
 
     private val tokenTallies = ConcurrentHashMap<String, TokenTally>()
 
+    /** Composite key; split back with [splitTallyKey]. */
+    fun tallyKey(host: String, model: String): String =
+        host.lowercase() + "\u0001" + model.lowercase()
+
+    private fun splitTallyKey(key: String): Pair<String, String> {
+        val i = key.indexOf('\u0001')
+        return if (i < 0) key to "" else key.substring(0, i) to key.substring(i + 1)
+    }
+
     data class TokenRow(
         val host: String,
+        val model: String,
         val inTokens: Long,
         val outTokens: Long,
         val cacheRead: Long,
@@ -605,7 +609,10 @@ object ProxyMetrics {
     fun tokenSummary(top: Int = 5): List<TokenRow> =
         tokenTallies.entries.sortedByDescending { it.value.total() }
             .take(top)
-            .map { (h, t) -> TokenRow(h, t.inTokens, t.outTokens, t.cacheRead, t.cacheWrite) }
+            .map { (k, t) ->
+                val (h, m) = splitTallyKey(k)
+                TokenRow(h, m, t.inTokens, t.outTokens, t.cacheRead, t.cacheWrite)
+            }
 
     fun resetTallies() {
         hostTallies.clear()
@@ -614,7 +621,6 @@ object ProxyMetrics {
         cacheReadTokens = 0
         cacheWriteTokens = 0
         tokenTallies.clear()
-        tokenEventTimes.clear()
         rateBuckets.clear()
         firstOutputMs = 0L
     }
@@ -624,6 +630,24 @@ object ProxyMetrics {
     // (input, output, cacheRead, cacheWrite).
     private val tokNum = { key: String, body: String ->
         Regex(""""$key"\s*:\s*(\d+)""").findAll(body).map { it.groupValues[1].toLong() }.sum()
+    }
+
+    private val modelName = Regex(""""model"\s*:\s*"([^"\\]{1,80})"""")
+
+    /**
+     * Best-effort model id from request head bytes (both families use a
+     * top-level "model" field, usually early in the body). "" when absent.
+     * Feeds per-model tallies for MITM tunnels, whose bodies otherwise
+     * stay opaque to the proxy.
+     */
+    fun sniffModel(head: ByteArray, len: Int = head.size): String {
+        if (len <= 0) return ""
+        return try {
+            val text = head.copyOf(len.coerceAtMost(head.size)).toString(Charsets.UTF_8)
+            modelName.find(text)?.groupValues?.getOrNull(1)?.trim() ?: ""
+        } catch (_: Exception) {
+            ""
+        }
     }
 
     fun scanUsage(body: String): LongArray {
