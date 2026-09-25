@@ -40,6 +40,8 @@ class ProxyService : Service() {
         /** Health self-ping cadence + consecutive failures before self-restart. */
         const val HEALTH_INTERVAL_SEC = 30L
         const val HEALTH_MAX_FAILS = 3
+        /** Notification channel: DEFAULT importance so "proxy is up" is visible. */
+        private const val CHANNEL_ID = "proxy_status"
 
         /** Pure restart decision (unit-tested). */
         fun healthNeedsRestart(failStreak: Int, maxFails: Int = HEALTH_MAX_FAILS): Boolean =
@@ -597,6 +599,7 @@ class ProxyService : Service() {
         } finally {
             activeSessions.remove(sessionId)
             SessionTracker.clear(sessionId)
+            ProxyMetrics.recordRequestEndIfOpen(sessionId, requestId)
             try { socket.close() } catch (_: Exception) {}
         }
     }
@@ -1041,23 +1044,43 @@ class ProxyService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel("proxy_channel", "Proxy Service", android.app.NotificationManager.IMPORTANCE_LOW)
-            channel.setShowBadge(false)
             val manager = getSystemService(NotificationManager::class.java)
+            // New channel id: importance is immutable once created, so the
+            // old LOW channel can never be promoted in place. Users have to
+            // SEE that the proxy is up, hence DEFAULT (still silent, no badge).
+            val channel = NotificationChannel(CHANNEL_ID, "Proxy Service", NotificationManager.IMPORTANCE_DEFAULT)
+            channel.setShowBadge(false)
+            channel.setSound(null, null)
+            channel.enableVibration(false)
+            channel.setDescription("Shows the proxy port and this device's addresses")
             manager.createNotificationChannel(channel)
+            if (CHANNEL_ID != "proxy_channel") manager.deleteNotificationChannel("proxy_channel")
         }
     }
 
     private fun updateNotification(text: String, isRunning: Boolean) {
-        val notification = NotificationCompat.Builder(this, "proxy_channel")
-            .setContentTitle("Network Proxy")
-            .setContentText(text)
+        val port = this.port
+        val title = if (isRunning) "Network Proxy running" else "Network Proxy stopped"
+        val detail = if (isRunning) {
+            val ips = LocalIps.list()
+            val line = if (ips.isEmpty()) "listening on 0.0.0.0:$port"
+            else ips.joinToString("  ") { "$it:$port" }
+            "$text\n$line"
+        } else text
+
+        val style = NotificationCompat.BigTextStyle().bigText(detail)
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(detail.lineSequence().first())
+            .setStyle(style)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setOngoing(isRunning)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .build()
 
         val manager = getSystemService(NotificationManager::class.java)
+        android.util.Log.i("NetworkProxy", "notification[$title]: ${detail.replace('\n', ' ')}")
         manager.notify(1, notification)
         if (isRunning) startForeground(1, notification) else stopForeground(true)
     }

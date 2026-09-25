@@ -278,6 +278,18 @@ object ProxyMetrics {
         return "other"
     }
 
+    /**
+     * Close out requests that never reached a terminal record (exceptions,
+     * early returns after start). No-op when already ended, so every
+     * started request ends exactly once and scenarioCounts stops
+     * undercounting early failures.
+     */
+    @Synchronized
+    fun recordRequestEndIfOpen(sessionId: String, requestId: String) {
+        if (!requestStartTimes.containsKey(requestId)) return
+        recordRequestEnd(sessionId, requestId, 0, 0, NetworkScenario.UNKNOWN)
+    }
+
     fun recordRequestEnd(sessionId: String, requestId: String, statusCode: Int, bytesTransferred: Long, scenario: NetworkScenario) {
         val start = requestStartTimes.remove(requestId) ?: System.currentTimeMillis()
         val metrics = RequestMetrics(

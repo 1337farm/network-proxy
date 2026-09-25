@@ -35,9 +35,8 @@ class MainActivity : AppCompatActivity() {
     private var setupScriptExpanded = false
     /** SAF picker target: the paste field of the open import dialog. */
     private var importPicker: ActivityResultLauncher<Intent>? = null
-    private var importBlobView: android.widget.EditText? = null
-    /** File text picked while the dialog was closed; pre-fills on reopen. */
-    private var pendingImportBlob: String? = null
+    private var pendingImportUri: android.net.Uri? = null
+    private var pendingImportName: String? = null
     private val statsHandler = Handler(Looper.getMainLooper())
     private val statsPoller = object : Runnable {
         override fun run() {
@@ -53,8 +52,9 @@ class MainActivity : AppCompatActivity() {
         viewModel = ViewModelProvider(this)[ProxyViewModel::class.java]
         viewModel.attach(this)
 
-        // SAF import picker: no storage permission needed; fills the
-        // open import dialog's paste field with the chosen file's text.
+        // SAF import picker: no storage permission needed. We keep the URI
+        // (not the text) so the dialog can show just the filename and the
+        // blob never lands in a text field.
         importPicker = registerForActivityResult(
             androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
         ) { res ->
@@ -65,18 +65,21 @@ class MainActivity : AppCompatActivity() {
                     return@registerForActivityResult
                 }
                 try {
-                    val text = contentResolver.openInputStream(uri)
-                        ?.bufferedReader()?.readText()?.trim() ?: ""
-                    if (!text.startsWith("npbk1:")) {
-                        Toast.makeText(this, "Not a vault backup (npbk1:…)", Toast.LENGTH_LONG).show()
+                    val head = contentResolver.openInputStream(uri)
+                        ?.bufferedReader()?.use { it.readText() }?.trim().orEmpty()
+                    if (!head.startsWith("npbk1:")) {
+                        Toast.makeText(
+                            this,
+                            "Not a backup file (expected npbk1:…)",
+                            Toast.LENGTH_LONG
+                        ).show()
                         return@registerForActivityResult
                     }
-                    importBlobView = null // dialog dismissed with Load-file tap
                     // Stash + reopen pre-filled so the user just enters
                     // their password and hits Import.
-                    pendingImportBlob = text
+                    pendingImportUri = uri
+                    pendingImportName = displayName(uri)
                     showImportBackupDialog()
-                    Toast.makeText(this, "Backup loaded — enter password, tap Import", Toast.LENGTH_LONG).show()
                 } catch (e: Exception) {
                     Toast.makeText(this, "Read failed: ${e.message}", Toast.LENGTH_LONG).show()
                 }
@@ -349,27 +352,49 @@ class MainActivity : AppCompatActivity() {
 
     /** Import dialog: load backup file (or paste) + password → validate → seal. */
     private fun showImportBackupDialog() {
+        val picked = pendingImportUri
+        val pickedName = pendingImportName
         val pw = textInput("Backup password", secret = true)
-        val blob = textInput("Paste backup (npbk1:…) or Load file")
-        pendingImportBlob?.let {
-            blob.setText(it)
-            pendingImportBlob = null
-        }
-        importBlobView = blob
         val layout = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(48, 24, 48, 0)
-            addView(blob); addView(pw)
         }
+        // File-loaded backup: show ONLY the filename. The 2 KB+ blob used to
+        // flood the field, which pushed the password box out of reach and
+        // caused "Import failed" (password typed into the blob instead).
+        var blob: android.widget.EditText? = null
+        if (picked != null) {
+            layout.addView(android.widget.TextView(this).apply {
+                text = "\uD83D\uDCC1 $pickedName"
+                textSize = 15f
+                setPadding(0, 16, 0, 0)
+            })
+            layout.addView(android.widget.TextView(this).apply {
+                text = "Enter the password this backup was exported with."
+                textSize = 12f
+                setPadding(0, 4, 0, 0)
+            })
+        } else {
+            blob = textInput("Paste backup (npbk1:…)")
+            layout.addView(blob)
+        }
+        layout.addView(pw)
+
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Import encrypted backup")
             .setView(layout)
             .setPositiveButton("Import") { _, _ ->
                 try {
-                    CredentialVault.importBackup(this, blob.text.toString(), pw.text.toString())
+                    val text = blob?.text?.toString()
+                        ?: contentResolver.openInputStream(picked!!)
+                            ?.bufferedReader()?.readText()
+                            ?: throw IllegalStateException("cannot read $pickedName")
+                    CredentialVault.importBackup(this, text, pw.text.toString())
+                    pendingImportUri = null
+                    pendingImportName = null
                     ProviderBroker.invalidate()
                     refreshProvidersSummary()
-                    Toast.makeText(this, "Backup imported", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Backup imported from $pickedName", Toast.LENGTH_SHORT).show()
                 } catch (e: Exception) {
                     Toast.makeText(this, "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
                 }
@@ -379,9 +404,26 @@ class MainActivity : AppCompatActivity() {
                 // reopens this dialog pre-filled (see picker callback).
                 openBackupPicker()
             }
-            .setNegativeButton("Cancel", null)
-            .setOnDismissListener { if (importBlobView === blob) importBlobView = null }
+            .setNegativeButton("Cancel") { _, _ ->
+                pendingImportUri = null
+                pendingImportName = null
+            }
             .show()
+    }
+
+    /** Human filename for a picked document URI ("…-1052.txt"). */
+    private fun displayName(uri: android.net.Uri): String {
+        try {
+            contentResolver.query(uri, null, null, null, null)?.use { c ->
+                val i = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (i >= 0 && c.moveToFirst()) {
+                    c.getString(i)?.let { return it }
+                }
+            }
+        } catch (e: Exception) {
+            // fall through to the last path segment
+        }
+        return uri.lastPathSegment?.substringAfterLast('/') ?: "backup.txt"
     }
 
     /** SAF file picker for backup files (no storage permission needed). */
