@@ -184,6 +184,23 @@
                         android:layout_marginTop="4dp"/>
 
                     <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:text="Sessions by key"
+                        android:textSize="13sp"
+                        android:textStyle="bold"
+                        style="@style/Text.SectionTitle"/>
+
+                    <LinearLayout
+                        android:id="@+id/sessionsList"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:orientation="vertical">
+                    </LinearLayout>
+
+                    <TextView
                         android:id="@+id/hostsText"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
@@ -229,22 +246,6 @@
                             android:inputType="number"
                             android:text="3128"/>
                     </com.google.android.material.textfield.TextInputLayout>
-
-                    <com.google.android.material.checkbox.MaterialCheckBox
-                        android:id="@+id/metricsCheck"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:text="@string/metrics_enabled"
-                        android:checked="true"/>
-
-                    <com.google.android.material.checkbox.MaterialCheckBox
-                        android:id="@+id/mitmCheck"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:text="@string/mitm_enabled"
-                        android:checked="true"/>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 

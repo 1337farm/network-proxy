@@ -34,4 +34,15 @@ object StatsFormat {
     /** "96.5%" style label for [cacheRatio]. */
     fun cachePct(cacheRead: Long, input: Long): String =
         String.format(Locale.US, "%.1f%%", 100.0 * cacheRatio(cacheRead, input))
+
+    /** Compact age: 12s, 3m, 2h, 5d. Pure (unit-tested). */
+    fun humanAge(startedMs: Long, nowMs: Long): String {
+        val s = ((nowMs - startedMs) / 1000).coerceAtLeast(0)
+        return when {
+            s < 60 -> "${s}s"
+            s < 3600 -> "${s / 60}m"
+            s < 86400 -> "${s / 3600}h"
+            else -> "${s / 86400}d"
+        }
+    }
 }

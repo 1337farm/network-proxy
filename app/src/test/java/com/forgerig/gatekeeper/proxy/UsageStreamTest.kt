@@ -137,13 +137,16 @@ class UsageStreamTest {
     @Test
     fun tokensPerSecondTrailingWindow() {
         ProxyMetrics.resetTallies()
-        ProxyMetrics.addTokens(100, 30, 0, 0)
+        // Rate credit flows only through the sampler (spread buckets),
+        // never as an addTokens side effect (that spiked on arrival).
+        ProxyMetrics.sampleOutput(30)
         assertEquals(1.0, ProxyMetrics.outputTokensPerSecond(30_000), 0.0001)
         assertEquals(3.0, ProxyMetrics.outputTokensPerSecond(10_000), 0.0001)
-        // Input-only adds carry no output events.
+        // Tallies alone move no rate.
         ProxyMetrics.resetTallies()
-        ProxyMetrics.addTokens(50, 0, 0, 0)
+        ProxyMetrics.addTokens(50, 30, 0, 0)
         assertEquals(0.0, ProxyMetrics.outputTokensPerSecond(), 0.0)
+        assertEquals(30L, ProxyMetrics.outputTokens)
         ProxyMetrics.resetTallies()
     }
 

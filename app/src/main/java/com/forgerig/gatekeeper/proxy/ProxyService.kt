@@ -72,6 +72,8 @@ class ProxyService : Service() {
 
     private val requestCount = AtomicLong(0)
     private val bytesOut = AtomicLong(0)
+    /** Start of the current listener run (for uptime display). */
+    @Volatile private var startedMs: Long = 0L
     // Session registry (not a counter): add on entry, remove in finally.
     // Removal is idempotent, so the old double-decrement on CONNECT tunnels
     // (handleConnect + handleClient both touched inFlight) can't skew it,
@@ -87,6 +89,15 @@ class ProxyService : Service() {
     fun getLastError(): String? = lastError
     fun getStats(): Triple<Long, Long, Int> =
         Triple(requestCount.get(), bytesOut.get(), activeSessions.size)
+
+    /** Uptime of the current listener run (0 when stopped). */
+    fun uptimeMs(): Long {
+        val s = startedMs
+        return if (running.get() == 1 && s > 0) System.currentTimeMillis() - s else 0L
+    }
+
+    /** Key-backed sessions for the Sessions-by-key UI (oldest first). */
+    fun sessionDetails(): List<SessionTracker.SessionInfo> = SessionTracker.snapshot()
 
     /** Zero the cumulative counters. Active sessions are a live registry, left alone. */
     fun resetStats() {
@@ -164,6 +175,7 @@ class ProxyService : Service() {
                 return@Thread
             }
             running.set(1)
+            startedMs = System.currentTimeMillis()
             lastHealthOkMs = System.currentTimeMillis()
             updateNotification("Proxy running on 0.0.0.0:$port", true)
             stateCallback?.invoke(true, null)
@@ -372,6 +384,17 @@ class ProxyService : Service() {
                 val seen = modelOf(body)
                 if (seen.isNotBlank()) ModelRouter.noteObserved(provider.id, seen)
             }
+            // Attribute this session for the Sessions-by-key UI: actual
+            // upstream key label + model, plus a conversation title from
+            // the first user turn (blank for non-chat bodies).
+            if (provider != null) {
+                val (pid, klabel) = keyCtx?.let { it.first.id to it.second.label }
+                    ?: (provider.id to "—")
+                SessionTracker.note(
+                    sessionId, pid, klabel, modelOf(body), host,
+                    title = SessionTracker.titleOf(body)
+                )
+            }
             var finalCode = -1
             var transferredTotal = 0L
             var keyRounds = 0
@@ -400,6 +423,10 @@ class ProxyService : Service() {
                         val retryAfterSecs = resp.headers["Retry-After"]?.toLongOrNull()
                         store.report(provider!!.id, kc.second.id, preCode, retryAfterSecs)
                         ModelHealth.recordErr(provider.id, modelOf(body))
+                        SessionTracker.noteEvent(
+                            sessionId,
+                            "HTTP $preCode on '${kc.second.label}' → rolling"
+                        )
                         keyRounds++
                         val next = nextUsableKey(
                             store, provider, kc.second.id, routeLeg,
@@ -410,6 +437,16 @@ class ProxyService : Service() {
                             routeLeg = next.leg
                             targetUrl = next.url
                             body = next.body
+                            SessionTracker.note(
+                                sessionId, next.key.first.id, next.key.second.label,
+                                modelOf(body), LlmPolicy.extractHost(targetUrl)
+                            )
+                            val spilled = next.key.first.id != provider.id
+                            SessionTracker.noteEvent(
+                                sessionId,
+                                if (spilled) "spill → ${next.key.first.id}/${modelOf(body)}"
+                                else "roll → '${next.key.second.label}'"
+                            )
                             mutableHeaders.keys.filter {
                                 it.equals("x-api-key", true) || it.equals("authorization", true)
                             }.forEach { mutableHeaders.remove(it) }
@@ -511,8 +548,9 @@ class ProxyService : Service() {
                                 val found = ProxyMetrics.scanUsage(it.toString("UTF-8"))
                                 if (found[0] + found[1] + found[2] + found[3] > 0) {
                                     // One call credits tallies + rate sampler
-                                    // together (see recordUsage).
-                                    ProxyMetrics.recordUsage(host, requestId, found)
+                                    // together (see recordUsage). Model is the
+                                    // upstream id actually requested.
+                                    ProxyMetrics.recordUsage(host, modelOf(body), requestId, found)
                                     ProxyMetrics.event(
                                         "Tokens $host in=${found[0]} out=${found[1]} " +
                                             "cacheR=${found[2]} cacheW=${found[3]}"
@@ -558,6 +596,7 @@ class ProxyService : Service() {
             e.printStackTrace()
         } finally {
             activeSessions.remove(sessionId)
+            SessionTracker.clear(sessionId)
             try { socket.close() } catch (_: Exception) {}
         }
     }
@@ -605,6 +644,16 @@ class ProxyService : Service() {
                 return
             }
             LlmPolicy.Decision.BROKERED -> { /* fall through to MITM attempt */ }
+        }
+        // Attribute tunneled sessions at provider level (client holds its
+        // own key inside the tunnel — label shows that; model fills in
+        // once the head sniff lands, else stays blank). matchHost (not
+        // matchProvider): CONNECT only has a bare host, no API path.
+        run {
+            val mp = ProviderStore.matchHost(connStore, host)
+            if (mp != null) {
+                SessionTracker.note(sessionId, mp.id, "(client key)", "", host.lowercase())
+            }
         }
         // Opt-in HTTPS split (Decrypt-HTTPS toggle): terminate client TLS
         // with our local CA leaf, re-originate verified TLS upstream, scan
@@ -672,6 +721,7 @@ class ProxyService : Service() {
             } catch (_: Exception) {}
         } finally {
             activeSessions.remove(sessionId)
+            SessionTracker.clear(sessionId)
             try { upstream?.close() } catch (_: Exception) {}
             try { clientSocket.close() } catch (_: Exception) {}
         }
@@ -728,10 +778,24 @@ class ProxyService : Service() {
             // close-time scan below only covers encoded bodies the live
             // scanner can't read — see scanTapBytesForClose).
             val liveUsage = ProxyMetrics.StreamingUsage()
-            val t1 = Thread { relayTap(cIn, uOut, upBytes, null, 0) }
-            val t2 = Thread { relayTap(uIn, cOut, downBytes, tap, tapCap, liveUsage, host, requestId) }
+            // Upstream model sniff: the first bytes of the decrypted
+            // request usually carry the top-level "model" field; feeds
+            // per-model tallies for a tunnel whose body stays opaque.
+            val upModel = java.util.concurrent.atomic.AtomicReference("")
+            val t1 = Thread { relayTap(cIn, uOut, upBytes, null, 0, modelRef = upModel) }
+            val t2 = Thread { relayTap(uIn, cOut, downBytes, tap, tapCap, liveUsage, host, requestId, upModel, false) }
             t1.start(); t2.start()
             t1.join(); t2.join()
+            // Backfill the sniffed upstream model into the session note
+            // (blank at CONNECT time — tunnel bodies stay opaque otherwise).
+            val sniffed = upModel.get()
+            if (sniffed.isNotBlank()) {
+                val st = ProviderBroker.store(this)
+                val mp = ProviderStore.matchHost(st, host)
+                SessionTracker.note(
+                    sessionId, mp?.id ?: "", "(client key)", sniffed, host.lowercase()
+                )
+            }
             // NOTE: bytesOut is fed per-chunk inside relay()/relayTap();
             // adding the lump sum here would double-count tunneled bytes.
             ProxyMetrics.addBytes(host, upBytes.get(), downBytes.get())
@@ -743,7 +807,7 @@ class ProxyService : Service() {
                 // picks up gzip/deflate bodies. Never recount plaintext.
                 val found = ProxyMetrics.scanTapBytesForClose(tap.toByteArray())
                 if (found[0] + found[1] + found[2] + found[3] > 0) {
-                    ProxyMetrics.recordUsage(host, requestId, found)
+                    ProxyMetrics.recordUsage(host, upModel.get(), requestId, found)
                     ProxyMetrics.event(
                         "Tokens $host in=${found[0]} out=${found[1]} " +
                             "cacheR=${found[2]} cacheW=${found[3]} (mitm encoded)"
@@ -755,7 +819,7 @@ class ProxyService : Service() {
             // live counts and the encoded-body fallback above.
             val tail = liveUsage.flush()
             if (tail[0] + tail[1] + tail[2] + tail[3] > 0) {
-                ProxyMetrics.recordUsage(host, requestId, tail)
+                ProxyMetrics.recordUsage(host, upModel.get(), requestId, tail)
                 ProxyMetrics.event(
                     "Tokens $host in=${tail[0]} out=${tail[1]} " +
                         "cacheR=${tail[2]} cacheW=${tail[3]} (live tail)"
@@ -777,7 +841,11 @@ class ProxyService : Service() {
     }
 
     /** Copy with byte counter + optional plaintext tap (capped) + optional
-     *  live usage scan (downstream direction only — pass null upstream). */
+     *  live usage scan (downstream direction only — pass null upstream).
+     *  [modelRef], when supplied on the UPSTREAM direction, sniffs the
+     *  request head for the top-level model id (first 4KB); downstream
+     *  tallies read it back for per-model attribution. Pass sniff=false
+     *  downstream so responses can never overwrite the request's model. */
     private fun relayTap(
         input: java.io.InputStream,
         output: java.io.OutputStream,
@@ -786,8 +854,12 @@ class ProxyService : Service() {
         tapCap: Int,
         liveUsage: ProxyMetrics.StreamingUsage? = null,
         usageHost: String = "",
-        requestId: String? = null
+        requestId: String? = null,
+        modelRef: java.util.concurrent.atomic.AtomicReference<String>? = null,
+        sniff: Boolean = true
     ) {
+        val head = java.io.ByteArrayOutputStream()
+        val headCap = 4096
         try {
             val buf = ByteArray(64 * 1024)
             while (true) {
@@ -800,10 +872,15 @@ class ProxyService : Service() {
                 if (tap != null && tap.size() < tapCap) {
                     tap.write(buf, 0, n.coerceAtMost(tapCap - tap.size()))
                 }
+                if (modelRef != null && sniff && modelRef.get().isEmpty() && head.size() < headCap) {
+                    head.write(buf, 0, n.coerceAtMost(headCap - head.size()))
+                    val sniffed = ProxyMetrics.sniffModel(head.toByteArray(), head.size())
+                    if (sniffed.isNotEmpty()) modelRef.set(sniffed)
+                }
                 if (liveUsage != null) {
                     val found = liveUsage.feed(buf, n)
                     if (found[0] + found[1] + found[2] + found[3] > 0) {
-                        ProxyMetrics.recordUsage(usageHost, requestId, found)
+                        ProxyMetrics.recordUsage(usageHost, modelRef?.get() ?: "", requestId, found)
                         ProxyMetrics.event(
                             "Tokens $usageHost in=${found[0]} out=${found[1]} " +
                                 "cacheR=${found[2]} cacheW=${found[3]} (live)"

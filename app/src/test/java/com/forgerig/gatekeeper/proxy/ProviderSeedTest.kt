@@ -87,6 +87,22 @@ class ProviderSeedTest {
         assertTrue(store.llmHosts().contains("openrouter.ai"))
     }
 
+    @Test
+    fun matchHostResolvesBareSniHosts() {
+        val store = ProviderStore.blank()
+        store.providers.clear()
+        store.providers["zen"] = ProviderStore.Provider("zen", "https://opencode.ai/zen/v1")
+        store.providers["openrouter"] = ProviderStore.Provider("openrouter", "https://openrouter.ai/api/v1")
+        // bare host (CONNECT-time) resolves where prefix-match cannot
+        assertEquals("zen", ProviderStore.matchHost(store, "opencode.ai")!!.id)
+        assertEquals("zen", ProviderStore.matchHost(store, "models.opencode.ai")!!.id)
+        assertEquals("openrouter", ProviderStore.matchHost(store, "openrouter.ai")!!.id)
+        assertEquals(null, ProviderStore.matchHost(store, "api.github.com"))
+        assertEquals(null, ProviderStore.matchHost(store, ""))
+        // and the old failure mode, documented: bare host never prefix-matches
+        assertEquals(null, ProviderStore.matchProvider(store, "https://opencode.ai"))
+    }
+
     // NOTE: fromJson() itself isn't unit-tested here — org.json is an
     // Android stub under plain JVM tests ("not mocked"). fromJson delegates
     // to ensureWellKnown, which the cases above cover.
