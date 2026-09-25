@@ -117,6 +117,21 @@ class StatsHealthTest {
     }
 
     @Test
+    fun samplerEvictsPastOneHour() {
+        ProxyMetrics.resetTallies()
+        val t0 = 1_700_000_000_000L
+        // 3601 distinct seconds with distinct values: oldest must fall off.
+        for (i in 0..3600) {
+            ProxyMetrics.sampleOutput((i + 1).toLong(), t0 + i * 1000L)
+        }
+        val hour = ProxyMetrics.rateHistory(3600, t0 + 3600_000L)
+        assertEquals(3600, hour.size)
+        assertEquals(2L, hour[0]) // value 1 (at t0) evicted
+        assertEquals(3601L, hour[3599])
+        ProxyMetrics.resetTallies()
+    }
+
+    @Test
     fun sniffModelFindsTopLevelId() {
         assertEquals(
             "claude-opus-5",

@@ -72,6 +72,8 @@ class ProxyService : Service() {
 
     private val requestCount = AtomicLong(0)
     private val bytesOut = AtomicLong(0)
+    /** Start of the current listener run (for uptime display). */
+    @Volatile private var startedMs: Long = 0L
     // Session registry (not a counter): add on entry, remove in finally.
     // Removal is idempotent, so the old double-decrement on CONNECT tunnels
     // (handleConnect + handleClient both touched inFlight) can't skew it,
@@ -87,6 +89,12 @@ class ProxyService : Service() {
     fun getLastError(): String? = lastError
     fun getStats(): Triple<Long, Long, Int> =
         Triple(requestCount.get(), bytesOut.get(), activeSessions.size)
+
+    /** Uptime of the current listener run (0 when stopped). */
+    fun uptimeMs(): Long {
+        val s = startedMs
+        return if (running.get() == 1 && s > 0) System.currentTimeMillis() - s else 0L
+    }
 
     /** Key-backed sessions for the Sessions-by-key UI (oldest first). */
     fun sessionDetails(): List<SessionTracker.SessionInfo> = SessionTracker.snapshot()
@@ -167,6 +175,7 @@ class ProxyService : Service() {
                 return@Thread
             }
             running.set(1)
+            startedMs = System.currentTimeMillis()
             lastHealthOkMs = System.currentTimeMillis()
             updateNotification("Proxy running on 0.0.0.0:$port", true)
             stateCallback?.invoke(true, null)

@@ -436,6 +436,11 @@ class MainActivity : AppCompatActivity() {
     private fun refreshStats() {
         val svc = viewModel.proxyService.value
         val (requests, bytes, active) = svc?.getStats() ?: Triple(0L, 0L, 0)
+        // Tick the uptime next to Running (updateUI only runs on state flips).
+        if (viewModel.isRunning.value == true && viewModel.lastError.value.isNullOrBlank()) {
+            findViewById<TextView>(R.id.statusText)?.text =
+                statusRunningLine(svc?.uptimeMs() ?: 0L)
+        }
         val snap = ProxyMetrics.snapshot()
         val retries = snap.retryCounts.values.sum()
         findViewById<TextView>(R.id.requestsText)?.text = "Requests: $requests"
@@ -603,7 +608,8 @@ class MainActivity : AppCompatActivity() {
     private fun renderSessionsList(svc: ProxyService?) {
         val list = findViewById<android.widget.LinearLayout>(R.id.sessionsList) ?: return
         list.removeAllViews()
-        val sessions = svc?.sessionDetails()?.take(20) ?: emptyList()
+        val all = svc?.sessionDetails() ?: emptyList()
+        val sessions = all.take(20)
         if (sessions.isEmpty()) {
             list.visibility = View.GONE
             return
@@ -634,7 +640,7 @@ class MainActivity : AppCompatActivity() {
             }
             list.addView(sub)
         }
-        val total = svc?.sessionDetails()?.size ?: 0
+        val total = all.size
         if (total > sessions.size) {
             val more = TextView(this).apply {
                 text = "+${total - sessions.size} more"
@@ -711,6 +717,14 @@ class MainActivity : AppCompatActivity() {
         return if (u == 0) "${bytes} B" else String.format("%.1f %s", v, units[u])
     }
 
+    /** "Running • up 3h12m" (uptime omitted when unknown). Pure formatting. */
+    fun statusRunningLine(uptimeMs: Long): String {
+        if (uptimeMs <= 0) return getString(R.string.status_running)
+        val m = uptimeMs / 60_000
+        val up = if (m < 60) "${m}m" else "${m / 60}h${m % 60}m"
+        return "${getString(R.string.status_running)} • up $up"
+    }
+
     private fun updateUI(isRunning: Boolean, error: String? = null) {
         val startStopButton = findViewById<MaterialButton>(R.id.startStopButton)
         val statusText = findViewById<TextView>(R.id.statusText)
@@ -738,7 +752,8 @@ class MainActivity : AppCompatActivity() {
         } else if (isRunning) {
             startStopButton.text = getString(R.string.stop_proxy)
             startStopButton.icon = getDrawable(android.R.drawable.ic_media_pause)
-            statusText.text = getString(R.string.status_running)
+            // Uptime ticks via refreshStats (updateUI only runs on state flips).
+            statusText.text = statusRunningLine(viewModel.proxyService.value?.uptimeMs() ?: 0L)
             statusText.setTextColor(running)
             statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(running)
             val lan = SetupScript.lanIp(this)

@@ -42,7 +42,6 @@ class TokenRateView @JvmOverloads constructor(
         private set
 
     private var shown: FloatArray = FloatArray(0) // eased 0..1 heights
-    private var target: FloatArray = FloatArray(0)
     private var animator: ValueAnimator? = null
     /** Absolute scale of the current frame (tokens/s at full height). */
     private var lastMax: Long = 1L
@@ -75,7 +74,6 @@ class TokenRateView @JvmOverloads constructor(
             shown.size > next.size -> shown.takeLast(next.size).toFloatArray()
             else -> FloatArray(next.size - shown.size) { 0f } + shown
         }
-        target = next
         animator?.cancel()
         if (from.contentEquals(next) || !isAttachedToWindow) {
             shown = next
@@ -100,7 +98,7 @@ class TokenRateView @JvmOverloads constructor(
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        when (event.action) {
+        when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 downX = event.x
                 downOffset = offsetSec
@@ -116,19 +114,25 @@ class TokenRateView @JvmOverloads constructor(
                     dragging = true
                 }
                 if (dragging) {
-                    val pxPerSec = (width - gutterPx()) / WINDOW_SECS.toFloat()
+                    val pxPerSec = ((width - gutterPx()) / WINDOW_SECS.toFloat())
+                        .coerceAtLeast(1f)
                     offsetSec = (downOffset - (dx / pxPerSec).toLong())
                         .coerceIn(0, MAX_BACK_SECS - WINDOW_SECS.toLong())
                     invalidate()
                 }
                 return true
             }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+            // Every gesture end (including multi-touch pointer lifts and
+            // cancel) releases the frame gate — otherwise a second finger
+            // lifting first would strand isInteracting=true and freeze
+            // chart updates. Only a clean single-tap snaps back to live.
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_UP -> {
                 parent?.requestDisallowInterceptTouchEvent(false)
-                val tap = !dragging && System.currentTimeMillis() - downMs < 300
+                val tap = !dragging && System.currentTimeMillis() - downMs < 300 &&
+                    event.actionMasked == MotionEvent.ACTION_UP
                 dragging = false
                 isInteracting = false
-                if (tap && event.action == MotionEvent.ACTION_UP) {
+                if (tap) {
                     offsetSec = 0 // snap back to live
                     invalidate()
                 }
