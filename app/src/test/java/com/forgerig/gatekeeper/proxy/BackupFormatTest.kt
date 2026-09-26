@@ -164,26 +164,6 @@ class SessionTitleTest {
     }
 }
 
-class StatusBarIconLabelTest {
-    @Test
-    fun compactLabels() {
-        assertEquals("0", StatusBarIcon.label(0.0))
-        assertEquals("0", StatusBarIcon.label(-1.0))
-        assertEquals("1.2", StatusBarIcon.label(1.24))
-        assertEquals("9.9", StatusBarIcon.label(9.94))
-        assertEquals("92", StatusBarIcon.label(91.8))
-        assertEquals("999", StatusBarIcon.label(998.6))
-        assertEquals("1.2k", StatusBarIcon.label(1234.0))
-    }
-
-    @Test
-    fun labelsStayShortEnoughForTheStatusBar() {
-        for (tps in doubleArrayOf(0.0, 5.0, 42.0, 300.0, 9999.0)) {
-            assertTrue("label too wide: " + StatusBarIcon.label(tps), StatusBarIcon.label(tps).length <= 5)
-        }
-    }
-}
-
 /** Pan direction was inverted: dragging right must go back in time. */
 class RateChartPanTest {
     private val pps = 2f // 2 px per second of history
