@@ -199,33 +199,38 @@ class RateChartPanTest {
 
 class NotificationTextTest {
     @Test
-    fun collapsedRowCarriesTheRate() {
+    fun collapsedRowIsTheStatusLine() {
         val b = NotificationText.running(listOf("100.81.194.26", "192.168.68.126"), 3128, 91.8, "1h 04m")
-        assertEquals("192.168.68.126:3128 · 92 tok/s  +1 more", b.collapsed)
-        // Expanded: every address, then uptime + rate.
-        assertTrue(b.expanded.contains("100.81.194.26:3128"))
-        assertTrue(b.expanded.contains("192.168.68.126:3128"))
-        assertTrue(b.expanded.contains("up 1h 04m"))
-        assertTrue(b.expanded.contains("92 tok/s"))
+        // Collapsed = setContentText: uptime + rate only, no addresses.
+        assertEquals("up 1h 04m · 92 tok/s", b.collapsed)
+        // Expanded = the same status line first, then one address per line.
+        assertEquals(
+            "up 1h 04m · 92 tok/s\n100.81.194.26:3128\n192.168.68.126:3128",
+            b.expanded
+        )
     }
 
     @Test
     fun idleRateStillRenders() {
         val b = NotificationText.running(listOf("192.168.1.5"), 3128, 0.0, "12s")
-        assertEquals("192.168.1.5:3128 · 0.0 tok/s", b.collapsed)
+        assertEquals("up 12s · 0.0 tok/s", b.collapsed)
     }
 
     @Test
-    fun noUptimeOmitsTheLine() {
+    fun noUptimeDegradesToRateOnly() {
         val b = NotificationText.running(listOf("192.168.1.5"), 3128, 5.0, null)
-        assertEquals("192.168.1.5:3128 · 5.0 tok/s", b.collapsed)
+        assertEquals("5.0 tok/s", b.collapsed)
         assertFalse(b.expanded.contains("up "))
+        assertFalse(b.expanded.contains("\n\n"))
     }
 
     @Test
     fun noAddressesFallsBackToTheBindAddress() {
         val b = NotificationText.running(emptyList(), 8080, 3.0, "5s")
-        assertEquals("listening on 0.0.0.0:8080 · 3.0 tok/s", b.collapsed)
+        // Collapsed stays status-only; the bind address keeps the port
+        // discoverable in the expanded body.
+        assertEquals("up 5s · 3.0 tok/s", b.collapsed)
+        assertEquals("up 5s · 3.0 tok/s\nlistening on 0.0.0.0:8080", b.expanded)
     }
 }
 

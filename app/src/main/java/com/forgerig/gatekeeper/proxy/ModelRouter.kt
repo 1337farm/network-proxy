@@ -4,9 +4,9 @@ package com.forgerig.gatekeeper.proxy
  * Smart spillover target selection: when a provider's pool is exhausted,
  * choose the best (provider, key, model) to retry with.
  *
- * Comparability ladder (cheapest decisive tier wins — the LLM judge is
- * the LAST resort, never the first call, because it costs a billed
- * request on the failure path and can itself be rate-limited):
+ * Comparability ladder (cheapest decisive tier wins — the judge is the
+ * LAST resort, never the first call, and must never cost a billed request
+ * on the failure path or add latency to a request that already failed):
  *
  * - Tier 0: exact model id on another same-family provider.
  * - Tier 1: normalized id match — strip `vendor/` prefix and `:suffix`
@@ -14,10 +14,12 @@ package com.forgerig.gatekeeper.proxy
  *   `claude-opus-5`), case-insensitive.
  * - Tier 2: any observed model on a same-family provider, ranked by
  *   [ModelHealth] (downtime/errors sink, healthy float).
- * - Tier 3: [JudgeFn] — ask a cheap healthy leg for pros/cons + a pick.
- *   Verdicts cached per failed-model with TTL; on judge failure, one
- *   narrowed follow-up, then Tier-2 best. (Execution wiring lands next;
- *   until then Tier 2 is the terminal tier.)
+ * - Tier 3: [JudgeFn] — a local, network-free [HeuristicJudge] arbitrates
+ *   among the observed candidates using the health ledger (a real, bounded
+ *   decision, not a blocking network call: no latency, no cost, no data
+ *   leaves the device). Verdicts are cached per failed-model with TTL; a
+ *   null verdict leaves Tier 2 standing. Assign [judge] to swap in a
+ *   different implementation.
  *
  * Candidates come from the observed-model registry (models actually seen
  * in passing traffic per provider) — ground truth with zero catalog
@@ -42,7 +44,35 @@ object ModelRouter {
         fun pick(failedModel: String, candidates: List<Pair<String, String>>): String?
     }
 
+    /**
+     * Tier-3 judge, assignable so tests and future network judges can
+     * replace the default. The default is [HeuristicJudge] — a purely
+     * **local** heuristic, deliberately not an LLM call: Tier 3 runs on the
+     * relay path of a request that has already failed, so it must not add
+     * latency to that request, must not spend money per failure, and must
+     * not ship user traffic off-device. The heuristic reads only the
+     * observed-model registry and the [ModelHealth] ledger, adds no
+     * measurable latency, and is deterministic.
+     *
+     * Assigning null disables Tier 3 entirely (Tier 2 becomes terminal).
+     */
     @Volatile var judge: JudgeFn? = null
+
+    private val defaultJudge: JudgeFn by lazy { HeuristicJudge() }
+
+    /**
+     * Installs the default local judge if no judge is set. Idempotent, and
+     * a no-op once anything has been assigned — so an explicit override
+     * (including null) is never stomped. Called from this object's init,
+     * so Tier 3 is live with no call-site change anywhere.
+     */
+    fun ensureJudgeInstalled() {
+        if (judge == null) judge = defaultJudge
+    }
+
+    init {
+        ensureJudgeInstalled()
+    }
 
     data class Selection(
         val provider: ProviderStore.Provider,

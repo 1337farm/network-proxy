@@ -655,10 +655,11 @@ object ProxyMetrics {
      * Single choke point for usage accounting: credits the token tallies
      * (split by host AND model) AND the rate sampler together, so the
      * displays can never drift apart. [found] is the scanner quad
-     * (input, output, cacheRead, cacheWrite) — already de-duplicated into
-     * DELTAS by [StreamingUsage] (a cumulative reporter's running total is
-     * credited as the increase, never verbatim), so this credits the quad
-     * exactly as given. [requestId] null = tally only (opaque paths with no
+     * (input, output, cacheRead, cacheWrite) — already reduced to the
+     * tokens to CREDIT by [StreamingUsage] under its per-key semantics
+     * (the output slot a cumulative reporter's increase, the one-shot slots
+     * a first-sighting full value), so this credits the quad exactly as
+     * given. [requestId] null = tally only (opaque paths with no
      * request context).
      */
     @Synchronized
@@ -753,6 +754,8 @@ object ProxyMetrics {
 
     /** "No value credited yet" marker for StreamingUsage's per-key trackers. */
     private const val USAGE_UNSET = -1L
+    /** Quad slot whose provider semantics are a per-response running total. */
+    private const val SLOT_OUTPUT = 1
     private val tokNum = { key: String, body: String ->
         Regex(""""$key"\s*:\s*(\d+)""").findAll(body).map { it.groupValues[1].toLong() }.sum()
     }
@@ -804,37 +807,96 @@ object ProxyMetrics {
      * deferred (remembered as [pendingText]) and resolved on the next
      * feed — or via [flush] at stream end.
      *
-     * CUMULATIVE REPORTERS: Anthropic-style SSE re-reports
+     * ## PER-KEY SEMANTICS (the providers do not agree, so neither do we)
+     *
+     * | quad slot | keys                                  | semantics   |
+     * |-----------|---------------------------------------|-------------|
+     * | 0 input   | `input_tokens`, `prompt_tokens`       | ONE-SHOT    |
+     * | 1 output  | `output_tokens`, `completion_tokens`  | CUMULATIVE  |
+     * | 2 cacheR  | `cache_read_input_tokens`, `cached_tokens` | ONE-SHOT |
+     * | 3 cacheW  | `cache_creation_input_tokens`         | ONE-SHOT    |
+     *
+     * **CUMULATIVE (output):** Anthropic-style SSE re-reports
      * `usage.output_tokens` as a RUNNING TOTAL in every `message_delta`
      * frame (12, then 40, then 150 for a 150-token completion), so crediting
      * each frame verbatim summed to 202 and the rate read ~35% hot — worse
      * with every extra frame, which is the 2k+ tok/s spike the user saw.
-     * Each newly matched value is therefore credited as a DELTA against the
-     * last value seen for that key ([addMatch]):
+     * Rule: value >= last -> credit the increase; an exactly repeated value
+     * credits 0 (replay / duplicate frame); value < last -> the running
+     * total restarted, i.e. a NEW response on this connection, credit in
+     * full.
      *
-     *  - value >= last  -> same response still running: credit the increase
-     *  - value <  last  -> a NEW response has started on this connection and
-     *    its running total restarted: credit the full value
-     *  - an exactly repeated value credits 0 (replay / duplicate frame)
+     * **ONE-SHOT (input / cache read / cache write):** the provider sends
+     * these ONCE per response, so there is nothing to diff. Crediting the
+     * full value on the first sighting of a response and IGNORING repeats
+     * within that same response is the only rule that is right. Diffing
+     * them was simply wrong: on a keep-alive connection one scanner spans
+     * many responses, so a second response reporting a LARGER
+     * `input_tokens` (a growing conversation: 100, then 350) was credited
+     * as only the 250 difference and input tokens under-counted by 250.
+     * Note `input_tokens` counts only the UNCACHED part of the prompt, so
+     * it is not even monotonic across a conversation — no difference rule
+     * can be right for it, which is exactly why it is one-shot.
      *
-     * This state is per SCANNER INSTANCE, i.e. per response stream, and is
-     * cleared by [flush]. It is deliberately NOT keyed on requestId: that id
-     * is minted per client CONNECTION, so a per-requestId watermark diffed
-     * every response on a keep-alive tunnel against the previous one and
-     * swallowed real tokens (the regression this design replaces).
+     * ## RESPONSE BOUNDARIES
+     *
+     * Authoritative, cheap and explicit: [beginResponse].
+     *
+     * Automatic fallback, so behaviour stays correct when nobody calls it
+     * ([addMatch]):
+     *  - cumulative: the decrease rule above (a restarted total).
+     *  - one-shot: an exactly REPEATED value is the same response (a
+     *    re-sent usage object) and credits 0; a CHANGED value is taken as
+     *    a new response and is credited in full. This is the rule that
+     *    turns a growing `input_tokens` into 100 + 350 = 450.
+     *
+     * State is per SCANNER INSTANCE. It is deliberately NOT keyed on
+     * requestId: that id is minted per client CONNECTION, so a
+     * per-requestId watermark diffed every response on a keep-alive tunnel
+     * against the previous one and swallowed real tokens (the regression
+     * this design replaces).
      *
      * Providers that report a single one-shot usage block (OpenAI) are
-     * unaffected: their only match per response finds last unset and is
+     * unaffected: their only match per response is a first sighting and is
      * credited in full.
      *
-     * Known limit of the rule (a decrease is the only in-band signal that a
-     * response ended): on one keep-alive connection, a per-response one-shot
-     * field whose value is LARGER than the previous response's for the same key
-     * (a growing conversation's `input_tokens`/`prompt_tokens`) is credited as
-     * the difference, not the sum. A real fix needs an explicit per-response
-     * reset from the relay, which is a ProxyService seam, not scanner-local
-     * state; until then the conservative direction is to under-count a
-     * one-shot input repeat rather than re-credit a cumulative total.
+     * ## RELAY HOOK — REQUIRED IN `ProxyService` (not owned by this file)
+     *
+     * The explicit boundary is what makes this exact, and it lives in the
+     * MITM downstream relay. Signature:
+     *
+     * ```
+     * fun ProxyMetrics.StreamingUsage.beginResponse(): LongArray
+     * ```
+     *
+     * It returns the credits it flushed (see its doc) and the caller must
+     * push them through `ProxyMetrics.recordUsage(host, model, requestId,
+     * …)` like any other quad. Add this inside
+     * `private fun relayTap(input, output, counter, tap, tapCap, liveUsage,
+     * usageHost, requestId, modelRef, sniff)` — ProxyService.kt:905 —
+     * in the downstream copy loop, immediately BEFORE the existing
+     * `liveUsage.feed(buf, n)` call at ProxyService.kt:936-937, on the
+     * branch that detects a fresh downstream HTTP response (an
+     * `HTTP/1.x ` status line at the head of the chunk):
+     *
+     * ```kotlin
+     * if (liveUsage != null) {
+     *     if (isResponseHead(buf, n)) {           // NEW: keep-alive boundary
+     *         val b = liveUsage.beginResponse()
+     *         if (b[0] + b[1] + b[2] + b[3] > 0) {
+     *             ProxyMetrics.recordUsage(usageHost, modelRef?.get() ?: "", requestId, b)
+     *         }
+     *     }
+     *     val found = liveUsage.feed(buf, n)
+     *     …
+     * }
+     * ```
+     *
+     * Calling it before the first response of a connection is a harmless
+     * no-op (the trackers start unset). Skipping it entirely still gives
+     * the correct 100 + 350 = 450 via the automatic fallback; the hook only
+     * removes the remaining ambiguity (a one-shot value that is identical
+     * across two consecutive responses is counted once, not twice).
      */
     class StreamingUsage {
         // Carry is decoded CHARS (not bytes) so every index below is exact;
@@ -850,13 +912,24 @@ object ProxyMetrics {
             "prompt_tokens", "completion_tokens", "cached_tokens"
         ).map { key -> key to Regex(""""$key"\s*:\s*(\d+)(?!\d)""") }
         private val keyValue = Regex(""""(\w+)"\s*:\s*(\d+)$""")
+
         /**
-         * Last value credited per quad slot (in, out, cacheRead, cacheWrite)
-         * for the response stream this scanner is watching. [USAGE_UNSET]
-         * means "nothing credited yet for this key" — a first sighting is
-         * always credited in full.
+         * Running-total watermark for the CUMULATIVE slot (output), for the
+         * response stream this scanner is watching. [USAGE_UNSET] means
+         * "nothing credited yet" — a first sighting is credited in full.
          */
-        private val lastSeen = LongArray(4) { USAGE_UNSET }
+        private var outputWatermark = USAGE_UNSET
+
+        /**
+         * Per ONE-SHOT slot (input, cache read, cache write): the value
+         * already credited for the CURRENT response, and whether one has
+         * been credited at all. A one-shot field is sent once per response,
+         * so a sighting while [oneShotCredited] is set is a re-sent usage
+         * object — credited 0 when identical, or taken as the start of a
+         * new response when it differs.
+         */
+        private val oneShotCredited = BooleanArray(4)
+        private val oneShotValue = LongArray(4)
 
         fun feed(chunk: ByteArray, len: Int): LongArray {
             val out = LongArray(4)
@@ -899,6 +972,38 @@ object ProxyMetrics {
         }
 
         /**
+         * Declare that a NEW response has started on this connection, so the
+         * one-shot keys are credited in full again and the output running
+         * total restarts.
+         *
+         * This is the explicit, authoritative alternative to guessing a
+         * boundary from the byte stream; the class doc gives the exact call
+         * site and signature the `ProxyService` relay owner must add inside
+         * `relayTap`. Cheap and allocation-free apart from the returned quad,
+         * and a no-op when called before the first response.
+         *
+         * Any match deferred by [feed] (a trailing digit run at a chunk edge)
+         * belongs to the response that is ENDING, so it is credited HERE
+         * against the old trackers before they are cleared — credited
+         * exactly once, and as a delta of the finished response's running
+         * total rather than as a fresh full value. The caller must push the
+         * returned quad through `ProxyMetrics.recordUsage` like any other.
+         *
+         * [carryText] is deliberately left intact: it is a byte-window
+         * artefact, not accounting state, and dropping it could lose a value
+         * whose key was split across a chunk edge.
+         */
+        fun beginResponse(): LongArray {
+            val out = LongArray(4)
+            pendingText?.let { addMatch(out, it) }
+            pendingText = null
+            outputWatermark = USAGE_UNSET
+            oneShotCredited.fill(false)
+            oneShotValue.fill(0L)
+            return out
+        }
+
+        /**
          * Credit a deferred trailing match and close the response boundary.
          *
          * Idempotent: the pending match is consumed (nulled) by the call that
@@ -907,20 +1012,25 @@ object ProxyMetrics {
          * per-key trackers are cleared because everything seen so far belongs
          * to the response that just ended — anything this scanner matches
          * next is credited from scratch rather than diffed against a total
-         * that is no longer running.
+         * that is no longer running. Same reset as [beginResponse], which
+         * makes flush a valid (end-of-stream) response boundary too.
          */
         fun flush(): LongArray {
             val out = LongArray(4)
             pendingText?.let { addMatch(out, it) }
             pendingText = null
-            lastSeen.fill(USAGE_UNSET)
+            outputWatermark = USAGE_UNSET
+            oneShotCredited.fill(false)
+            oneShotValue.fill(0L)
             return out
         }
 
         /**
-         * Credit one matched `"key":digits` span as a DELTA against the last
-         * value seen for that key. See the class doc for the rule; the
-         * single-slot arithmetic is the whole fix.
+         * Credit one matched `"key":digits` span under the per-key semantics
+         * documented on the class: the output slot is a running total and is
+         * credited as the increase since its watermark; the input and cache
+         * slots are one-shot per response, credited in full on their first
+         * sighting of a response and 0 on an identical repeat.
          */
         private fun addMatch(out: LongArray, matchText: String) {
             val m = keyValue.find(matchText) ?: return
@@ -932,13 +1042,25 @@ object ProxyMetrics {
                 "cache_creation_input_tokens" -> 3
                 else -> return
             }
-            val prev = lastSeen[slot]
-            // No prior value, or the running total restarted (new response on
-            // this connection): credit in full. Otherwise credit the increase,
-            // which is 0 for an exact repeat.
-            val delta = if (prev == USAGE_UNSET || value < prev) value else value - prev
-            lastSeen[slot] = value
-            out[slot] += delta
+            if (slot == SLOT_OUTPUT) {
+                // CUMULATIVE. No prior value, or the running total restarted
+                // (new response on this connection): credit in full.
+                // Otherwise credit the increase, which is 0 for an exact
+                // repeat (replayed frame).
+                val prev = outputWatermark
+                val delta = if (prev == USAGE_UNSET || value < prev) value else value - prev
+                outputWatermark = value
+                out[slot] += delta
+                return
+            }
+            // ONE-SHOT. Never diffed: a repeat inside the same response
+            // credits 0, and a CHANGED value is the automatic new-response
+            // signal, so a growing input_tokens (100 then 350) sums to 450
+            // rather than being diffed down to 250.
+            if (oneShotCredited[slot] && value == oneShotValue[slot]) return
+            oneShotCredited[slot] = true
+            oneShotValue[slot] = value
+            out[slot] += value
         }
     }
 

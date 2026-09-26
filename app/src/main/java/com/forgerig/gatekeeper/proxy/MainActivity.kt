@@ -26,7 +26,6 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val PREFS = "gatekeeper"
         private const val KEY_SHOULD_RUN = "proxyShouldRun"
-        private const val KEY_MITM = "mitmChecked"
         private const val KEY_NOTIF_ASKED = "notifPermissionAsked"
     }
 
