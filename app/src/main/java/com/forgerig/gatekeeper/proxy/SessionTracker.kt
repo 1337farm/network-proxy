@@ -64,7 +64,7 @@ object SessionTracker {
     fun titleOf(body: ByteArray?): String {
         if (body == null || body.size > 512 * 1024) return ""
         return try {
-            val o = org.json.JSONObject(body.toString(Charsets.UTF_8))
+            val o = org.json.JSONObject(jsonBody(body).toString(Charsets.UTF_8))
             val arr = o.optJSONArray("messages") ?: return ""
             for (i in 0 until arr.length()) {
                 val m = arr.optJSONObject(i) ?: continue
@@ -90,6 +90,32 @@ object SessionTracker {
         } catch (_: Exception) {
             ""
         }
+    }
+
+    /**
+     * The JSON body out of a raw request stream. A tapped MITM request
+     * starts with `POST /v1/messages HTTP/1.1` + headers, which makes
+     * JSONObject throw ("must begin with '{'") and silently blank every
+     * title — so the request line/headers are stripped first. A no-op for
+     * callers that already pass a bare body. Pure (unit-tested).
+     */
+    internal fun jsonBody(raw: ByteArray): ByteArray {
+        val headEnd = indexOfHeaderEnd(raw)
+        if (headEnd >= 0) return raw.copyOfRange(headEnd, raw.size)
+        // No CRLFCRLF yet (tap cut short): a stream that starts with '{'
+        // is already the body, anything else has no usable body.
+        return if (raw.isNotEmpty() && raw[0] == '{'.code.toByte()) raw else ByteArray(0)
+    }
+
+    private fun indexOfHeaderEnd(raw: ByteArray): Int {
+        var i = 0
+        while (i + 3 < raw.size) {
+            if (raw[i] == '\r'.code.toByte() && raw[i + 1] == '\n'.code.toByte() &&
+                raw[i + 2] == '\r'.code.toByte() && raw[i + 3] == '\n'.code.toByte()
+            ) return i + 4
+            i++
+        }
+        return -1
     }
 
     fun clear(sessionId: String) {

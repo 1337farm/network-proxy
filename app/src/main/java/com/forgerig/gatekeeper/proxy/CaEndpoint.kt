@@ -10,8 +10,16 @@ package com.forgerig.gatekeeper.proxy
  */
 object CaEndpoint {
 
-    /** True for requests addressed at this proxy asking for the CA. */
-    fun isLocalCaRequest(target: String): Boolean {
+    /**
+     * True for requests addressed at this proxy asking for the CA.
+     *
+     * [peerIsLoopback] is mandatory: the listener binds 0.0.0.0, so
+     * without it any host on the LAN could `GET /ca.pem` (origin-form) or
+     * `GET http://127.0.0.1:3128/ca.pem` and fingerprint that this device
+     * runs a MITM proxy. Only same-device callers may fetch the CA.
+     */
+    fun isLocalCaRequest(target: String, peerIsLoopback: Boolean = true): Boolean {
+        if (!peerIsLoopback) return false
         val path = pathOf(target) ?: return false
         if (path != "/ca.pem") return false
         if (target.startsWith("/")) return true
@@ -22,6 +30,14 @@ object CaEndpoint {
         } catch (_: Exception) {
             false
         }
+    }
+
+    /** True when [remoteAddress] is a loopback literal. */
+    fun isLoopbackPeer(remoteAddress: String?): Boolean {
+        val a = remoteAddress?.trim()?.removePrefix("[")?.removeSuffix("]").orEmpty()
+        if (a.isEmpty()) return false
+        return a == "::1" || a == "localhost" ||
+            a.startsWith("127.") || a.substringBefore('%').startsWith("127.")
     }
 
     /** Path component of an origin-form or absolute-form request target. */

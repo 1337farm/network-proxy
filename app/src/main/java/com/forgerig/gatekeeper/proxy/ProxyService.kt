@@ -264,7 +264,7 @@ class ProxyService : Service() {
             // GET http://example.com/ca.pem must still go upstream.
             // Handled here, before any upstream forwarding, so it never
             // leaks upstream.
-            if (method == "GET" && isLocalCaRequest(url)) {
+            if (method == "GET" && isLocalCaRequest(url, CaEndpoint.isLoopbackPeer(socket.inetAddress?.hostAddress))) {
                 serveCaPem(output, sessionId, requestId)
                 return
             }
@@ -658,7 +658,7 @@ class ProxyService : Service() {
                 SessionTracker.note(sessionId, mp.id, "(client key)", "", host.lowercase())
             }
         }
-        // Opt-in HTTPS split (Decrypt-HTTPS toggle): terminate client TLS
+        // HTTPS split (always on; no user toggle): terminate client TLS
         // with our local CA leaf, re-originate verified TLS upstream, scan
         // plaintext usage blocks. Needs the CA installed client-side
         // (setup script curls /ca.pem); otherwise the client aborts the
@@ -761,6 +761,10 @@ class ProxyService : Service() {
             val upCtx = MitmCa.upstreamContext()
             val raw = Socket()
             raw.connect(InetSocketAddress(host, port), 30_000)
+            // Same read timeout opaqueTunnel uses: t2.join() is unbounded,
+            // so a silently-idle upstream would otherwise pin a pool
+            // thread (plus ~750KB of tap buffers) for the process lifetime.
+            raw.soTimeout = 120_000
             tlsUp = upCtx.socketFactory.createSocket(raw, host, port, true) as javax.net.ssl.SSLSocket
             tlsUp.useClientMode = true
             tlsUp.sslParameters = tlsUp.sslParameters.apply {
@@ -1063,9 +1067,11 @@ class ProxyService : Service() {
         val title = if (isRunning) "Network Proxy running" else "Network Proxy stopped"
         val detail = if (isRunning) {
             val ips = LocalIps.list()
-            val line = if (ips.isEmpty()) "listening on 0.0.0.0:$port"
-            else ips.joinToString("  ") { "$it:$port" }
-            "$text\n$line"
+            // The collapsed row is what people actually read, so it has to
+            // carry an address: the bind address (0.0.0.0) is useless to
+            // anyone pointing a client at this proxy.
+            val head = if (ips.isEmpty()) "listening on 0.0.0.0:$port" else "on $port  " + ips.joinToString("  ") { "$it:$port" }
+            "$head\nvia $text"
         } else text
 
         val style = NotificationCompat.BigTextStyle().bigText(detail)
@@ -1099,7 +1105,8 @@ class ProxyService : Service() {
      * Logic lives in [CaEndpoint] (unit-tested); kept here as a thin
      * delegate so existing call sites don't churn.
      */
-    internal fun isLocalCaRequest(target: String): Boolean = CaEndpoint.isLocalCaRequest(target)
+    internal fun isLocalCaRequest(target: String, peerIsLoopback: Boolean = true): Boolean =
+        CaEndpoint.isLocalCaRequest(target, peerIsLoopback)
 
     /** Path component of an origin-form or absolute-form request target. */
     internal fun caPathOf(target: String): String? = CaEndpoint.pathOf(target)

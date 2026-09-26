@@ -132,14 +132,14 @@ object CredentialVault {
         val clean = blob.trim().removePrefix("\uFEFF").trim()
         val parts = clean.split(":")
         require(parts.size == 4 && parts[0] == "npbk1") { "not a network-proxy backup" }
-        val dec = java.util.Base64.getMimeDecoder()
-        val key = pbkdf2(password, dec.decode(parts[1]))
-        val c = Cipher.getInstance("AES/GCM/NoPadding")
-        c.init(
-            Cipher.DECRYPT_MODE, key,
-            GCMParameterSpec(128, dec.decode(parts[2]))
-        )
+        // Everything from here on is inside the try: a truncated or
+        // hand-edited salt/IV used to surface as a raw JDK message
+        // ("Illegal base64 character ...") instead of our guidance.
         return try {
+            val dec = java.util.Base64.getMimeDecoder()
+            val key = pbkdf2(password, dec.decode(parts[1]))
+            val c = Cipher.getInstance("AES/GCM/NoPadding")
+            c.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, dec.decode(parts[2])))
             c.doFinal(dec.decode(parts[3])).toString(Charsets.UTF_8)
         } catch (e: Exception) {
             throw IllegalArgumentException("wrong password (or the file is damaged)", e)
@@ -162,8 +162,13 @@ object CredentialVault {
 
     private fun pbkdf2(password: String, salt: ByteArray): SecretKey {
         val spec = javax.crypto.spec.PBEKeySpec(password.toCharArray(), salt, PBKDF2_ROUNDS, 256)
-        val bytes = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-            .generateSecret(spec).encoded
-        return javax.crypto.spec.SecretKeySpec(bytes, "AES")
+        return try {
+            val bytes = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+                .generateSecret(spec).encoded
+            javax.crypto.spec.SecretKeySpec(bytes, "AES")
+        } finally {
+            // Don't leave the password char[] reachable until the next GC.
+            spec.clearPassword()
+        }
     }
 }

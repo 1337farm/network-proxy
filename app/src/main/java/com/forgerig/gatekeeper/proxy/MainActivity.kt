@@ -27,6 +27,7 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS = "gatekeeper"
         private const val KEY_SHOULD_RUN = "proxyShouldRun"
         private const val KEY_MITM = "mitmChecked"
+        private const val KEY_NOTIF_ASKED = "notifPermissionAsked"
     }
 
     private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -35,6 +36,7 @@ class MainActivity : AppCompatActivity() {
     private var setupScriptExpanded = false
     /** SAF picker target: the paste field of the open import dialog. */
     private var importPicker: ActivityResultLauncher<Intent>? = null
+    private var notifPermissionLauncher: ActivityResultLauncher<String>? = null
     private var pendingImportUri: android.net.Uri? = null
     private var pendingImportName: String? = null
     private val statsHandler = Handler(Looper.getMainLooper())
@@ -51,6 +53,26 @@ class MainActivity : AppCompatActivity() {
 
         viewModel = ViewModelProvider(this)[ProxyViewModel::class.java]
         viewModel.attach(this)
+
+        // API 33+ needs a runtime grant before the foreground notification
+        // is allowed into the drawer.
+        notifPermissionLauncher = registerForActivityResult(
+            androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            if (granted) {
+                // Re-post so the drawer shows it immediately.
+                viewModel.ensureRunning(
+                    findViewById<TextInputEditText>(R.id.portInput)?.text?.toString()?.toIntOrNull() ?: 3128,
+                    metricsEnabled = true, mitmEnabled = true
+                )
+            } else {
+                Toast.makeText(
+                    this,
+                    "Notifications are blocked — you won't see the proxy status until allowed in Settings.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
 
         // SAF import picker: no storage permission needed. We keep the URI
         // (not the text) so the dialog can show just the filename and the
@@ -108,6 +130,11 @@ class MainActivity : AppCompatActivity() {
             val p = portInput.text.toString().toIntOrNull() ?: 3128
             viewModel.ensureRunning(p, metricsEnabled = true, mitmEnabled = true)
         }
+
+        // The "proxy is running" notification is the only way to see the
+        // port/IP without opening the app, so ask for the runtime grant
+        // once. Skipped when already answered (or below API 33).
+        ensureNotificationPermission()
 
         val refreshScript = {
             val p = portInput.text.toString().toIntOrNull() ?: 3128
@@ -223,6 +250,21 @@ class MainActivity : AppCompatActivity() {
     private fun refreshProvidersSummary() {
         findViewById<TextView>(R.id.providersSummaryText)?.text =
             ProviderBroker.store(this).summary()
+    }
+
+    /**
+     * Ask for POST_NOTIFICATIONS (API 33+) if it has not been decided yet.
+     * Without it the foreground notification exists but never reaches the
+     * drawer, which reads as "the proxy is not running".
+     */
+    private fun ensureNotificationPermission() {
+        if (android.os.Build.VERSION.SDK_INT < 33) return
+        val perm = android.Manifest.permission.POST_NOTIFICATIONS
+        if (checkSelfPermission(perm) == android.content.pm.PackageManager.PERMISSION_GRANTED) return
+        if (prefs().getBoolean(KEY_NOTIF_ASKED, false)) return
+        prefs().edit().putBoolean(KEY_NOTIF_ASKED, true).apply()
+        (notifPermissionLauncher?.launch(perm)
+            ?: android.util.Log.w("NetworkProxy", "notification permission launcher unavailable"))
     }
 
     private fun textInput(hint: String, secret: Boolean = false): android.widget.EditText {
@@ -387,14 +429,13 @@ class MainActivity : AppCompatActivity() {
                 try {
                     val text = blob?.text?.toString()
                         ?: contentResolver.openInputStream(picked!!)
-                            ?.bufferedReader()?.readText()
+                            ?.bufferedReader()?.use { it.readText() }
                             ?: throw IllegalStateException("cannot read $pickedName")
                     CredentialVault.importBackup(this, text, pw.text.toString())
-                    pendingImportUri = null
-                    pendingImportName = null
                     ProviderBroker.invalidate()
                     refreshProvidersSummary()
-                    Toast.makeText(this, "Backup imported from $pickedName", Toast.LENGTH_SHORT).show()
+                    val from = pickedName?.let { " from $it" } ?: ""
+                    Toast.makeText(this, "Backup imported$from", Toast.LENGTH_SHORT).show()
                 } catch (e: Exception) {
                     Toast.makeText(this, "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
                 }
@@ -404,7 +445,11 @@ class MainActivity : AppCompatActivity() {
                 // reopens this dialog pre-filled (see picker callback).
                 openBackupPicker()
             }
-            .setNegativeButton("Cancel") { _, _ ->
+            .setNegativeButton("Cancel", null)
+            // Also clear on back-press / outside tap, not just Cancel:
+            // otherwise the next Import dialog claims a stale file whose
+            // transient URI grant may already be gone.
+            .setOnDismissListener {
                 pendingImportUri = null
                 pendingImportName = null
             }
@@ -575,7 +620,10 @@ class MainActivity : AppCompatActivity() {
     private fun renderCacheChart() {
         val chart = findViewById<android.widget.LinearLayout>(R.id.cacheChart) ?: return
         chart.removeAllViews()
-        val rows = ProxyMetrics.tokenSummary(8)
+        // Rows are per (host, model) so the model is visible, but cap the
+        // rows per host: otherwise one provider serving six models would
+        // fill every slot and hide every other host.
+        val rows = ProxyMetrics.capPerHost(ProxyMetrics.tokenSummary(16), 2)
         if (rows.isEmpty()) {
             chart.visibility = View.GONE
             return

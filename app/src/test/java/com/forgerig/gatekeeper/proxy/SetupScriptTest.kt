@@ -1,5 +1,6 @@
 package com.forgerig.gatekeeper.proxy
 
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -120,7 +121,48 @@ class SetupScriptTest {
         assertTrue(script.contains("installed-rootfs"))
         assertTrue(script.contains("network-proxy-ca.crt"))
         assertTrue(script.contains("update-ca-certificates"))
-        // Env vars do not cross proot: the script must say so.
-        assertTrue(script.contains("do NOT cross") || script.contains("do not cross"))
+    }
+
+    @Test
+    fun prootFanoutIsReachableAndOnlyRunsInTermux() {
+        // Substring presence alone would pass if the block were stranded in
+        // an unreachable branch, so assert the structure around it.
+        val script = rendered()
+        val termuxDetect = script.indexOf("IS_TERMUX=1; fi")
+        val ubuntuOverride = script.indexOf("ID=ubuntu")
+        val fanout = script.indexOf("installed-rootfs")
+        assertTrue("Termux detection missing", termuxDetect > 0)
+        assertTrue("no fan-out after the Termux detection", fanout > termuxDetect)
+        // $PREFIX leaks into proot, so the Ubuntu os-release check has to
+        // run AFTER detection and clear the flag again.
+        assertTrue(
+            "Ubuntu os-release must clear the Termux guess",
+            ubuntuOverride > termuxDetect &&
+                script.substring(ubuntuOverride, script.indexOf('\n', ubuntuOverride)).contains("IS_TERMUX=0")
+        )
+        // Inside the branch, guarded on a non-empty CA file.
+        val guarded = script.substring(termuxDetect, fanout)
+        assertTrue("fan-out must be guarded on a non-empty CA file", guarded.contains("-s \"\$CA_PEM\""))
+    }
+
+    @Test
+    fun foundFlagOnlySetAfterASuccessfulCopy() {
+        // FOUND=1 before the cp would report success for a rootfs the CA
+        // never reached (storage permission), hiding the failure.
+        val script = rendered()
+        val cpIdx = script.indexOf("network-proxy-ca.crt\" 2>/dev/null; then")
+        val foundIdx = script.indexOf("FOUND=1", cpIdx)
+        assertTrue("cp-then-FOUND order not found", cpIdx > 0 && foundIdx > cpIdx)
+    }
+
+    @Test
+    fun prootNoteNoLongerClaimsEnvVarsAreBlocked() {
+        // proot-distro logins inherit the parent env, so the old "env vars
+        // do NOT cross into proot" line sent users to re-paste forever.
+        val script = rendered()
+        assertFalse(
+            "stale env-var claim still present",
+            script.contains("do NOT cross") || script.contains("do not cross the proot")
+        )
     }
 }
