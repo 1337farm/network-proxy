@@ -41,10 +41,13 @@ class ProxyService : Service() {
         const val HEALTH_INTERVAL_SEC = 30L
         const val HEALTH_MAX_FAILS = 3
         /**
-         * Notification refresh cadence. 3s is plenty for a glanceable tok/s
-         * and costs a third of the notification traffic 1Hz did.
+         * Notification refresh cadence. 5s is plenty for a glanceable
+         * tok/s: the post is skipped entirely unless the rendered line
+         * changes, so this only bounds how fast a real change can appear.
          */
-        private const val NOTIFY_TICK_SEC = 3L
+        private const val NOTIFY_TICK_SEC = 5L
+        /** How long a cached interface list stays fresh. */
+        private const val LOCAL_IPS_TTL_MS = 30_000L
         /** Notification channel: DEFAULT importance so "proxy is up" is visible. */
         private const val CHANNEL_ID = "proxy_status"
 
@@ -69,6 +72,10 @@ class ProxyService : Service() {
     // Health self-ping: proves the listener accepts connections; restarts
     // the listener (not the process) after consecutive failures.
     private var healthExec: java.util.concurrent.ScheduledExecutorService? = null
+    /** Cached interface list + when it was refreshed. */
+    @Volatile private var cachedIps: List<String>? = null
+    @Volatile private var cachedIpsAt: Long = 0L
+
     /** Wall-clock start of the current run, for the notification's uptime. */
     @Volatile private var startedAtMs: Long = 0L
     /** Last posted notification signature; suppresses no-op re-posts. */
@@ -1089,6 +1096,26 @@ class ProxyService : Service() {
 
 
     /** Elapsed proxy uptime as a compact "1h 04m" / "12m 30s" string. */
+    /**
+     * Local addresses for the notification, cached briefly.
+     *
+     * NetworkInterface.getNetworkInterfaces() is a JNI call that allocates a
+     * fresh set of interface objects per call, and it was running on every
+     * notification tick - including the ticks where the post was then
+     * skipped because nothing had changed. Interfaces change on the order of
+     * minutes, not seconds, so a short TTL takes it off the hot path without
+     * the notification showing a stale address for long.
+     */
+    private fun cachedLocalIps(): List<String> {
+        val now = System.currentTimeMillis()
+        val cached = cachedIps
+        if (cached != null && now - cachedIpsAt < LOCAL_IPS_TTL_MS) return cached
+        val fresh = LocalIps.list()
+        cachedIps = fresh
+        cachedIpsAt = now
+        return fresh
+    }
+
     private fun uptimeText(): String? {
         val started = startedAtMs
         if (started <= 0) return null
@@ -1129,7 +1156,7 @@ class ProxyService : Service() {
         val tps = if (isRunning) ProxyMetrics.outputTokensPerSecond() else 0.0
         val title = if (isRunning) "Network Proxy running" else "Network Proxy stopped"
         val body = if (isRunning) {
-            NotificationText.running(LocalIps.list(), port, tps, uptimeText())
+            NotificationText.running(cachedLocalIps(), port, tps, uptimeText())
         } else {
             NotificationText.plain(text)
         }
