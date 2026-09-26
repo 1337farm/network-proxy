@@ -554,12 +554,117 @@ object ProxyMetrics {
      */
     const val MAX_SPREAD_SECS = 60
 
+    // ---- Per-(provider, model) breakdown of the SAME rate ring ----
+    //
+    // The chart draws one stack of bars per model+provider. Each series is
+    // fed from the identical spread plan that feeds the aggregate (one code
+    // path, creditOutput), so
+    //   sum(series.total) == rateHistory(n, at).sum()
+    // is an identity of the implementation, not a reconciliation pass, and
+    // a stacked bar can never be taller than the aggregate line. Nothing
+    // here re-derives usage numbers: the count credited is the very same
+    // already-delta'd output delta that credits the token tallies (see
+    // recordUsage), so the per-key replay/boundary semantics of
+    // StreamingUsage carry over untouched.
+    //
+    // COST. The aggregate is ONE TreeMap and rateHistory does a lookup per
+    // second; a series read instead does one O(log S) probe per series plus
+    // one O(log S) step per non-empty second in the window (S = seconds
+    // retained in that series, <= RATE_HISTORY_SECS), and allocates nothing
+    // beyond the LongArray per live series the caller asked for — the whole
+    // retention window is never rebuilt, and an idle series costs a single
+    // failed probe. Worst case that is MAX_RATE_SERIES x RATE_WINDOW_SECS
+    // longs (64 x 120 = 7.7k, ~61KB) per call, i.e. bounded and small
+    // against the FloatArray churn the chart already does per frame, and the
+    // typical case is a handful of live models. The read is on the UI's hot
+    // path twice over: once per 1-2 Hz poll AND once per pan frame (the
+    // chart re-queries its window on every drag), so it stays a single
+    // monitor acquisition, a TreeMap cursor walk, and one sort of <= 64
+    // elements. Writes cost one extra TreeMap update per plan slot
+    // (<= MAX_SPREAD_SECS per response).
+    //
+    // LOCKING. Every mutation AND the read take the SAME monitor the
+    // aggregate already uses (the object's @Synchronized), so no new lock
+    // is introduced and 32 relay threads see no added contention: one
+    // recordUsage still means exactly one monitor acquisition, with the
+    // plan computed once and applied to both rings inside it.
+
+    /**
+     * Hard cap on tracked series. A long-running proxy can observe an
+     * unbounded number of models, which is the same class of leak
+     * [pruneRequestMetrics] already fixes for request records: past the cap
+     * the least-recently-written series is dropped whole (its ring with it)
+     * rather than being allowed to grow. An evicted model reappears — and
+     * restarts from an empty window — on its next response.
+     *
+     * This is the ONE documented way the sum identity can lapse: the
+     * aggregate ring never forgets a credited second, so the tokens of an
+     * evicted model stay in [rateHistory] while its series is gone, and
+     * `sum(rateSeries(...).total)` then falls short of the aggregate by
+     * exactly the evicted series' in-window totals (bounded by the cap, not
+     * by traffic). That is deliberate — a chart that showed a synthetic
+     * "(dropped)" stack would mislabel another model's tokens — and it only
+     * happens past 64 distinct live (provider, model) pairs, which no real
+     * setup reaches. Raise the cap if yours does.
+     */
+    const val MAX_RATE_SERIES = 64
+
+    /** Provider id used by call sites that cannot attribute one. See recordUsage. */
+    const val UNATTRIBUTED_PROVIDER = ""
+
+    private class SeriesRing {
+        val buckets = java.util.TreeMap<Long, Long>()
+    }
+
+    /**
+     * Access-ordered, so [MAX_RATE_SERIES] evicts the least recently written
+     * series (a read counts as a use: a model still on screen is not the one
+     * dropped). Guarded by the object's monitor, like the aggregate ring.
+     */
+    private val rateSeriesRings = object : java.util.LinkedHashMap<String, SeriesRing>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, SeriesRing>) =
+            size > MAX_RATE_SERIES
+    }
+
+    /**
+     * Composite series key. Case-folded like [tallyKey] so one model cannot
+     * split across two series on a casing difference, and therefore so
+     * "same model" means the same thing here as in the token table.
+     */
+    fun seriesKey(provider: String, model: String): String =
+        provider.trim().lowercase() + "\u0001" + model.trim().lowercase()
+
+    private fun splitSeriesKey(key: String): Pair<String, String> {
+        val i = key.indexOf('\u0001')
+        return if (i < 0) key to "" else key.substring(0, i) to key.substring(i + 1)
+    }
+
+    private fun ringFor(key: String): SeriesRing =
+        rateSeriesRings.getOrPut(key) { SeriesRing() }
+
+    /**
+     * Add to one series ring under the SAME [RATE_HISTORY_SECS] retention
+     * and oldest-first eviction as the aggregate, so a series can never hold
+     * a second the aggregate has already dropped — the sum identity survives
+     * retention, not just steady state.
+     */
+    private fun addToSeriesBucket(ring: SeriesRing, sec: Long, count: Long) {
+        if (count <= 0) return
+        val b = ring.buckets
+        b[sec] = (b[sec] ?: 0L) + count
+        while (b.size > RATE_HISTORY_SECS) {
+            val oldest = b.firstKey() ?: break
+            b.remove(oldest)
+        }
+    }
 
     /** Fold output tokens into the current second-bucket (test seam: [atMs]). */
     @Synchronized
-    fun sampleOutput(count: Long, atMs: Long = System.currentTimeMillis()) {
+    fun sampleOutput(count: Long, atMs: Long = System.currentTimeMillis(), seriesKey: String? = null) {
         if (count <= 0) return
-        addToBucket(atMs / 1000, count)
+        val sec = atMs / 1000
+        addToBucket(sec, count)
+        seriesKey?.let { addToSeriesBucket(ringFor(it), sec, count) }
     }
 
     /**
@@ -573,12 +678,8 @@ object ProxyMetrics {
      * the distribution is honest.
      */
     @Synchronized
-    fun sampleOutputUnknownSpan(count: Long, atMs: Long = System.currentTimeMillis()) {
-        if (count <= 0) return
-        val plan = spreadPlan(count, MIN_SPAN_SECS)
-        val endSec = atMs / 1000
-        val base = endSec - plan.size + 1
-        plan.forEachIndexed { i, c -> addToBucket(base + i, c) }
+    fun sampleOutputUnknownSpan(count: Long, atMs: Long = System.currentTimeMillis(), seriesKey: String? = null) {
+        creditOutput(seriesKey, null, count, atMs)
     }
 
     private fun addToBucket(sec: Long, count: Long) {
@@ -591,6 +692,31 @@ object ProxyMetrics {
     }
 
     /**
+     * The one credit path behind both the aggregate ring and every series
+     * ring: compute the spread plan ONCE and apply it, second by second, to
+     * both. [seriesKey] null = aggregate only (the pre-existing
+     * aggregate-only samplers). [requestId] null = unknown span, i.e. the
+     * [MIN_SPAN_SECS] smear.
+     *
+     * Because both rings are written from the same `base + i` seconds, the
+     * MAX_SPREAD_SECS clamp, the MIN_SPAN_SECS floor and the even-split
+     * remainder are identical on both sides by construction.
+     */
+    private fun creditOutput(seriesKey: String?, requestId: String?, count: Long, atMs: Long) {
+        if (count <= 0) return
+        val startMs = if (requestId != null) (requestStartTimes[requestId] ?: 0L) else 0L
+        val spanSecs = if (startMs > 0) ((atMs - startMs) / 1000).toInt() else 0
+        val plan = spreadPlan(count, smoothedSpanSecs(spanSecs))
+        val endSec = atMs / 1000
+        val base = endSec - plan.size + 1
+        val ring = seriesKey?.let { ringFor(it) }
+        plan.forEachIndexed { i, c ->
+            addToBucket(base + i, c)
+            if (ring != null) addToSeriesBucket(ring, base + i, c)
+        }
+    }
+
+    /**
      * Credit output tokens across the request's ACTIVE seconds (first to
      * last) instead of the arrival second. Usage totals arrive in the
      * final chunk, so arrival-bucketing fabricates spikes (2k tokens
@@ -599,8 +725,12 @@ object ProxyMetrics {
      * [MIN_SPAN_SECS] smear when the request start is unknown.
      */
     @Synchronized
-    fun sampleOutputSpread(requestId: String, count: Long, atMs: Long = System.currentTimeMillis()) {
-        if (count <= 0) return
+    fun sampleOutputSpread(
+        requestId: String,
+        count: Long,
+        atMs: Long = System.currentTimeMillis(),
+        seriesKey: String? = null
+    ) {
         // Cache-read/cache-write never reach here: recordUsage passes
         // found[1] (output_tokens) alone.
         //
@@ -611,13 +741,7 @@ object ProxyMetrics {
         // one and real output was silently dropped. The dedupe now lives in
         // StreamingUsage, whose lifetime is exactly one response stream, and
         // every report reaching this method is already a delta to credit.
-        val startMs = requestStartTimes[requestId] ?: 0L
-        val spanSecs = if (startMs > 0) ((atMs - startMs) / 1000).toInt() else 0
-        // Bound work and ring pressure; density stays honest for real spans.
-        val plan = spreadPlan(count, smoothedSpanSecs(spanSecs))
-        val endSec = atMs / 1000
-        val base = endSec - plan.size + 1
-        plan.forEachIndexed { i, c -> addToBucket(base + i, c) }
+        creditOutput(seriesKey, requestId, count, atMs)
     }
 
     /**
@@ -661,20 +785,168 @@ object ProxyMetrics {
      * a first-sighting full value), so this credits the quad exactly as
      * given. [requestId] null = tally only (opaque paths with no
      * request context).
+     *
+     * ## PROVIDER ATTRIBUTION FOR [rateSeries]
+     *
+     * This overload CANNOT attribute a provider and says so by crediting
+     * [UNATTRIBUTED_PROVIDER] (""), which is the same convention
+     * [tallyKey] already uses for a blank model. Every current call site is
+     * in that bucket, and none of them is a place where a provider id
+     * exists:
+     *
+     *  - `ProxyService`:610 — brokered upstream request. The leg's provider
+     *    is known there only as a `ProviderBroker` store/entry, which is
+     *    context-backed (`ProviderBroker.store(this)`) and read back on
+     *    other lines of the same handler; this accounting site has no
+     *    reference to it.
+     *  - `ProxyService`:889 (encoded-body fallback) and :901 (live tail) —
+     *    inside `mitmSplit`, which has `host` and the sniffed model but
+     *    not the provider.
+     *  - `ProxyService`:1019 — the live downstream relay, which credits per
+     *    chunk; a `ProviderStore.matchHost` lookup per chunk would re-read
+     *    the store from disk on the hot path.
+     *
+     * Resolving a provider id is therefore a `ProxyService` change (it owns
+     * the store handle): thread the matched `Provider.id` in from those four
+     * sites and call the 5-argument overload below. Until then the chart's
+     * provider axis shows one "" group per model — grouped, but not
+     * provider-split. This file deliberately does NOT infer a provider from
+     * the host: the same model can be served by several configured
+     * providers, so a host-derived id would be a guess, and a guess that
+     * silently looks like attribution in the UI is worse than an honestly
+     * empty group.
      */
     @Synchronized
     fun recordUsage(host: String, model: String, requestId: String?, found: LongArray) {
+        recordUsage(host, model, requestId, found, UNATTRIBUTED_PROVIDER)
+    }
+
+    /**
+     * As [recordUsage] above, but attributes the rate credit to
+     * (providerId, model) as well. [providerId] is the configured
+     * provider's `Provider.id` ([UNATTRIBUTED_PROVIDER] when genuinely
+     * unknown — pass it explicitly rather than defaulting, so an
+     * unattributed call site stays visible in review).
+     *
+     * One monitor acquisition: the plan is computed once by [creditOutput]
+     * and applied to the aggregate ring and the series ring together, which
+     * is what makes sum(series) == rateHistory(...).sum() hold. The count
+     * credited is [found]'s already-delta'd output slot, never re-derived,
+     * so a replayed frame or a [StreamingUsage.beginResponse] boundary
+     * flush credits identically here and to the aggregate.
+     */
+    @Synchronized
+    fun recordUsage(
+        host: String,
+        model: String,
+        requestId: String?,
+        found: LongArray,
+        providerId: String
+    ) {
         require(found.size == 4) { "usage quad must be (in, out, cacheR, cacheW)" }
         addTokens(found[0], found[1], found[2], found[3], host, model)
         if (requestId != null) {
-            sampleOutputSpread(requestId, found[1])
+            creditOutput(seriesKey(providerId, model), requestId, found[1], System.currentTimeMillis())
         }
     }
+
     @Synchronized
     fun rateHistory(nSecs: Int = RATE_CHART_SECS, atMs: Long = System.currentTimeMillis()): List<Long> {
         val n = nSecs.coerceIn(1, RATE_HISTORY_SECS)
         val nowSec = atMs / 1000
         return List(n) { i -> rateBuckets[nowSec - n + 1 + i] ?: 0L }
+    }
+
+    /**
+     * One (provider, model) output-rate series, as a slice of the aggregate
+     * ring rather than a resample of it. [perSecond][i] is the second
+     * `atMs/1000 - perSecond.size + 1 + i`, i.e. oldest first and index-
+     * aligned with [rateHistory] of the same size, so a chart can stack
+     * these and the stack's column i sums to the aggregate's column i.
+     * [total] is the in-window sum of [perSecond] (a series idle for the
+     * whole window is still reported, with zeros, so its legend/colour
+     * survives a lull).
+     */
+    data class RateSeries(
+        val provider: String,
+        val model: String,
+        val perSecond: LongArray,
+        val total: Long
+    ) {
+        /**
+         * Stable identity of this series, for a caller that needs one (the
+         * chart hashes it to pick a segment colour that survives reordering
+         * and re-polling). Derived, not stored: it is exactly the ring key.
+         */
+        val key: String get() = seriesKey(provider, model)
+
+        /** Value equality, so two reads of the same series compare equal. */
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is RateSeries) return false
+            return provider == other.provider && model == other.model &&
+                total == other.total && perSecond.contentEquals(other.perSecond)
+        }
+
+        override fun hashCode(): Int {
+            var h = provider.hashCode()
+            h = 31 * h + model.hashCode()
+            h = 31 * h + total.hashCode()
+            h = 31 * h + perSecond.contentHashCode()
+            return h
+        }
+    }
+
+    private val RATE_SERIES_ORDER: Comparator<RateSeries> =
+        compareByDescending<RateSeries> { it.total }
+            .thenBy { it.provider }
+            .thenBy { it.model }
+
+    /**
+     * Per-(provider, model) output tok/s over the trailing [nSecs] seconds
+     * ending at [atMs], heaviest first, ties broken by provider then model.
+     * The total ordering makes the result deterministic across polls, so
+     * the UI can keep a stable stacking order and a stable colour per
+     * series.
+     *
+     * Summed over every series this equals `rateHistory(nSecs, atMs).sum()`
+     * — see the section note above for why that is structural, and
+     * [MAX_RATE_SERIES] for the single documented exception (a series evicted
+     * by the cap). Deliberately NOT truncated to a top-N here: a folded list
+     * would stop summing to the aggregate on every poll, not just under
+     * pathological model churn. Callers that draw a bounded number of stacks
+     * fold afterwards.
+     *
+     * Costs one LongArray(nSecs) per live series and nothing else: the
+     * in-window seconds are walked with a cursor into the ring rather than
+     * by rebuilding the retention window, and a series idle for the whole
+     * window costs a single failed probe.
+     */
+    @Synchronized
+    fun rateSeries(
+        nSecs: Int = RATE_WINDOW_SECS,
+        atMs: Long = System.currentTimeMillis()
+    ): List<RateSeries> {
+        val n = nSecs.coerceIn(1, RATE_HISTORY_SECS)
+        val nowSec = atMs / 1000
+        val firstSec = nowSec - n + 1
+        val out = ArrayList<RateSeries>(rateSeriesRings.size)
+        for ((key, ring) in rateSeriesRings) {
+            val perSecond = LongArray(n)
+            var total = 0L
+            val buckets = ring.buckets
+            var cursor = buckets.ceilingEntry(firstSec)
+            while (cursor != null && cursor.key <= nowSec) {
+                val i = (cursor.key - firstSec).toInt()
+                perSecond[i] = cursor.value
+                total += cursor.value
+                cursor = buckets.higherEntry(cursor.key)
+            }
+            val (provider, model) = splitSeriesKey(key)
+            out.add(RateSeries(provider, model, perSecond, total))
+        }
+        out.sortWith(RATE_SERIES_ORDER)
+        return out
     }
 
     fun hostSummary(top: Int = 5): List<Triple<String, Long, Long>> =
@@ -745,6 +1017,9 @@ object ProxyMetrics {
         cacheWriteTokens = 0
         tokenTallies.clear()
         rateBuckets.clear()
+        // Series rings too: a reset that left them behind would re-create
+        // output the aggregate has forgotten and break the sum identity.
+        rateSeriesRings.clear()
         firstOutputMs = 0L
     }
 
@@ -873,11 +1148,12 @@ object ProxyMetrics {
      * push them through `ProxyMetrics.recordUsage(host, model, requestId,
      * …)` like any other quad. Add this inside
      * `private fun relayTap(input, output, counter, tap, tapCap, liveUsage,
-     * usageHost, requestId, modelRef, sniff)` — ProxyService.kt:905 —
+     * usageHost, requestId, modelRef, sniff)` in ProxyService.kt — locate
+     * it by name, the line numbers move with every other edit to that file —
      * in the downstream copy loop, immediately BEFORE the existing
-     * `liveUsage.feed(buf, n)` call at ProxyService.kt:936-937, on the
-     * branch that detects a fresh downstream HTTP response (an
-     * `HTTP/1.x ` status line at the head of the chunk):
+     * `liveUsage.feed(buf, n)` call, on the branch that detects a fresh
+     * downstream HTTP response (an `HTTP/1.x ` status line at the head of
+     * the chunk):
      *
      * ```kotlin
      * if (liveUsage != null) {
