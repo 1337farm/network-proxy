@@ -246,6 +246,22 @@
                             android:inputType="number"
                             android:text="3128"/>
                     </com.google.android.material.textfield.TextInputLayout>
+<com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/statusBarRateSwitch"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:text="Show tok/s in the status bar"
+                        android:textSize="14sp"
+                        android:checked="true"/>
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="Some Android skins (ColorOS/Oplus) replace the status-bar icon with the app icon. If so, allow notifications to show it in Settings."
+                        android:textSize="12sp"
+                        android:textColor="@color/hint_text"/>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 

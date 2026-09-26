@@ -128,3 +128,59 @@ class RecordRequestEndIfOpenTest {
         assertTrue(ProxyMetrics.snapshot().requests.none { it.requestId == "never-started" })
     }
 }
+
+/**
+ * tok/s spikes: a non-streaming/gzip response reports its whole completion
+ * count at once, which used to land in a single one-second bucket and read
+ * as thousands of tok/s.
+ */
+class RateSpikeTest {
+    private fun peakPerSecond(hist: List<Long>): Long = hist.maxOrNull() ?: 0
+
+    @Test
+    fun unknownSpanSpreadsInsteadOfDumpingOneSecond() {
+        ProxyMetrics.resetTallies()
+        val now = System.currentTimeMillis()
+        // No requestStartTimes entry -> unknown span, the close-time path.
+        ProxyMetrics.sampleOutputUnknownSpan(4000, now)
+        val hist = ProxyMetrics.rateHistory(60, now)
+        assertTrue("no tokens recorded", hist.sum() > 0)
+        // 4000 in one second read as "4000 tok/s"; spread over MIN_SPAN_SECS
+        // the peak is a fraction of that while the total is unchanged.
+        assertEquals(4000L, hist.sum())
+        assertTrue(
+            "still spiky: peak ${hist.max()} tok/s",
+            hist.max() <= 4000L / ProxyMetrics.MIN_SPAN_SECS && hist.max() < 4000L
+        )
+        // Spread over a window, not one bucket.
+        assertTrue("not spread", hist.count { it > 0 } >= 2)
+    }
+
+    @Test
+    fun repeatedUnknownSpanReportsDoNotCompound() {
+        ProxyMetrics.resetTallies()
+        val now = System.currentTimeMillis()
+        repeat(5) { ProxyMetrics.sampleOutputUnknownSpan(1000, now) }
+        // Five 1000-token reports over the same window stay spread out
+        // rather than stacking into a single multi-thousand bucket.
+        val hist = ProxyMetrics.rateHistory(60, now)
+        assertEquals(5000L, hist.sum())
+        assertTrue("compounded into one second: ${peakPerSecond(hist)}", peakPerSecond(hist) <= 2000L)
+    }
+
+    @Test
+    fun replayedUsageBlockDoesNotAddTokens() {
+        ProxyMetrics.resetTallies()
+        val id = "resume-1"
+        ProxyMetrics.recordRequestStart("s", id, "https://api.openai.com/v1/chat/completions", "POST")
+        val t = System.currentTimeMillis()
+        ProxyMetrics.sampleOutputSpread(id, 500, t)
+        val afterFirst = ProxyMetrics.rateHistory(60, t).sum()
+        // Same block again (client resumed the session).
+        ProxyMetrics.sampleOutputSpread(id, 500, t)
+        assertEquals(afterFirst, ProxyMetrics.rateHistory(60, t).sum())
+        // A cumulative provider reporting 900 total credits only the new 400.
+        ProxyMetrics.sampleOutputSpread(id, 900, t)
+        assertEquals(afterFirst + 400, ProxyMetrics.rateHistory(60, t).sum())
+    }
+}

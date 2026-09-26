@@ -34,6 +34,7 @@ class ProxyService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.forgerig.gatekeeper.proxy.STOP"
+        const val ACTION_REFRESH_NOTIFICATION = "com.forgerig.gatekeeper.proxy.REFRESH_NOTIFICATION"
         const val EXTRA_ONLY_IF_STOPPED = "onlyIfStopped"
         private const val MAX_BODY_BYTES = 32 * 1024 * 1024L
         private const val POOL_SIZE = 32
@@ -118,6 +119,12 @@ class ProxyService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_REFRESH_NOTIFICATION) {
+            // Settings changed (status-bar rate toggle): re-post now.
+            lastNotifSignature = ""
+            if (running.get() == 1) updateNotification("Proxy running on 0.0.0.0:$port", true)
+            return START_STICKY
+        }
         if (intent?.action == ACTION_STOP) {
             stopProxy()
             stopSelf()
@@ -1071,6 +1078,10 @@ class ProxyService : Service() {
         updateNotification("Proxy running on 0.0.0.0:$port", true)
     }
 
+    /** Status-bar tok/s readout; default on. Shares MainActivity's prefs. */
+    private fun statusBarRateEnabled(): Boolean =
+        getSharedPreferences("gatekeeper", MODE_PRIVATE).getBoolean("statusBarRate", true)
+
     /** Status-bar icon edge in px, from the system density. */
     private fun iconSizePx(): Int =
         (24 * resources.displayMetrics.density).toInt().coerceIn(48, 192)
@@ -1149,7 +1160,7 @@ class ProxyService : Service() {
         // small icon is the live number next to wifi/cellular. Stopped: a
         // plain glyph (setSmallIcon has Icon and Drawable overloads, so the
         // two branches cannot share one call).
-        if (isRunning) {
+        if (isRunning && statusBarRateEnabled()) {
             builder.setSmallIcon(StatusBarIcon.render(iconLabel, iconSizePx()))
         } else {
             builder.setSmallIcon(android.R.drawable.ic_dialog_info)
