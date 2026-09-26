@@ -80,16 +80,18 @@ class StatsHealthTest {
     @Test
     fun recordUsageCreditsTallyAndSamplerTogether() {
         ProxyMetrics.resetTallies()
-        // unknown request → arrival-second fallback; last bucket holds it
+        // Unknown request → unknown-span fallback, which now spreads the
+        // total over MIN_SPAN_SECS instead of dumping it into one second
+        // (a whole non-streaming response used to read as N tok/s).
         ProxyMetrics.recordUsage("h", "", "nope-missing", longArrayOf(100, 7, 0, 0))
         assertEquals(100L, ProxyMetrics.inputTokens)
         assertEquals(7L, ProxyMetrics.outputTokens)
-        assertEquals(listOf(7L), ProxyMetrics.rateHistory(1))
+        assertEquals(7L, ProxyMetrics.rateHistory(ProxyMetrics.MIN_SPAN_SECS).sum())
         // null request → tally only, sampler untouched
         ProxyMetrics.recordUsage("h", "", null, longArrayOf(10, 5, 0, 0))
         assertEquals(110L, ProxyMetrics.inputTokens)
         assertEquals(12L, ProxyMetrics.outputTokens)
-        assertEquals(listOf(7L), ProxyMetrics.rateHistory(1))
+        assertEquals(7L, ProxyMetrics.rateHistory(ProxyMetrics.MIN_SPAN_SECS).sum())
     }
 
     @Test

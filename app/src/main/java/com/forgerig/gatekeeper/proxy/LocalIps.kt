@@ -27,6 +27,21 @@ object LocalIps {
 
     private fun octets(ip: String): List<Int> = ip.split('.').map { it.toInt() }
 
+    /**
+     * The single address most worth showing: a private home/LAN range
+     * first, because that is what another device on the network has to be
+     * pointed at (VPN/Tailscale addresses sort lower numerically and are
+     * rarely the one you want to type). Pure (unit-tested).
+     */
+    fun primary(ips: List<String>): String? {
+        if (ips.isEmpty()) return null
+        val o = ips.sortedWith(OCTET_ORDER)
+        return o.firstOrNull { it.startsWith("192.168.") }
+            ?: o.firstOrNull { it.startsWith("10.") }
+            ?: o.firstOrNull { it.startsWith("172.") && it.split('.').getOrNull(1)?.toIntOrNull() in 16..31 }
+            ?: o.first()
+    }
+
     private val OCTET_ORDER = Comparator<String> { a, b ->
         val x = octets(a)
         val y = octets(b)

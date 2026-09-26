@@ -28,6 +28,8 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_SHOULD_RUN = "proxyShouldRun"
         private const val KEY_MITM = "mitmChecked"
         private const val KEY_NOTIF_ASKED = "notifPermissionAsked"
+        /** Status-bar tok/s readout; on by default. */
+        private const val KEY_STATUSBAR_RATE = "statusBarRate"
     }
 
     private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -135,6 +137,15 @@ class MainActivity : AppCompatActivity() {
         // port/IP without opening the app, so ask for the runtime grant
         // once. Skipped when already answered (or below API 33).
         ensureNotificationPermission()
+        // Status-bar tok/s toggle (default on).
+        findViewById<com.google.android.material.materialswitch.MaterialSwitch>(R.id.statusBarRateSwitch)?.let { sw ->
+            sw.isChecked = prefs().getBoolean(KEY_STATUSBAR_RATE, true)
+            sw.setOnCheckedChangeListener { _, checked ->
+                prefs().edit().putBoolean(KEY_STATUSBAR_RATE, checked).apply()
+                // Re-post so the change shows without waiting for a tick.
+                viewModel.refreshNotification()
+            }
+        }
 
         val refreshScript = {
             val p = portInput.text.toString().toIntOrNull() ?: 3128
@@ -266,6 +277,9 @@ class MainActivity : AppCompatActivity() {
         (notifPermissionLauncher?.launch(perm)
             ?: android.util.Log.w("NetworkProxy", "notification permission launcher unavailable"))
     }
+
+    private fun toast(msg: String) =
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
 
     private fun textInput(hint: String, secret: Boolean = false): android.widget.EditText {
         return android.widget.EditText(this).apply {
@@ -544,6 +558,16 @@ class MainActivity : AppCompatActivity() {
         // While a pan gesture is active the view owns its frame — pushing
         // poll data mid-drag would snap the bars out from under the finger.
         findViewById<TokenRateView>(R.id.rateChart)?.let { chart ->
+            // The view re-queries on every pan so the graph updates
+            // immediately; this poll only feeds the live edge.
+            if (chart.sampleProvider == null) {
+                chart.sampleProvider = { offSec ->
+                    ProxyMetrics.rateHistory(
+                        TokenRateView.WINDOW_SECS,
+                        System.currentTimeMillis() - offSec * 1000
+                    )
+                }
+            }
             if (!chart.isInteracting) {
                 chart.setSamples(
                     ProxyMetrics.rateHistory(

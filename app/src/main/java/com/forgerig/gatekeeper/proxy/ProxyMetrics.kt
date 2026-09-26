@@ -178,6 +178,8 @@ data class RequestMetrics(
 object ProxyMetrics {
     private val sessionStartTimes = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val requestStartTimes = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    /** Last output total seen per request, so replays/resumes are not re-credited. */
+    private val lastOutByRequest = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val scenarioCounts = java.util.concurrent.ConcurrentHashMap<String, Int>()
     private val retryCounts = java.util.concurrent.ConcurrentHashMap<String, Int>()
     private val sessionMetrics = java.util.concurrent.ConcurrentHashMap<String, SessionMetrics>()
@@ -388,6 +390,7 @@ object ProxyMetrics {
     fun clear() {
         sessionStartTimes.clear()
         requestStartTimes.clear()
+        lastOutByRequest.clear()
         scenarioCounts.clear()
         retryCounts.clear()
         sessionMetrics.clear()
@@ -534,11 +537,34 @@ object ProxyMetrics {
     /** Default visible window of the scrollable chart. */
     const val RATE_WINDOW_SECS = 120
 
+    /** Window used when a response's generation span is unknown. */
+    const val MIN_SPAN_SECS = 4
+
+
     /** Fold output tokens into the current second-bucket (test seam: [atMs]). */
     @Synchronized
     fun sampleOutput(count: Long, atMs: Long = System.currentTimeMillis()) {
         if (count <= 0) return
         addToBucket(atMs / 1000, count)
+    }
+
+    /**
+     * Fold output tokens in when the generation span is unknown, smearing
+     * them over [MIN_SPAN_SECS] rather than one second.
+     *
+     * A non-streaming (or gzip, opaque-to-the-live-scanner) response reports
+     * its whole completion count in one report at close. Crediting that to a
+     * single second reads as "4000 tok/s" for work that actually took
+     * seconds — the spikes that kept showing up. Totals are unchanged; only
+     * the distribution is honest.
+     */
+    @Synchronized
+    fun sampleOutputUnknownSpan(count: Long, atMs: Long = System.currentTimeMillis()) {
+        if (count <= 0) return
+        val plan = spreadPlan(count, MIN_SPAN_SECS)
+        val endSec = atMs / 1000
+        val base = endSec - plan.size + 1
+        plan.forEachIndexed { i, c -> addToBucket(base + i, c) }
     }
 
     private fun addToBucket(sec: Long, count: Long) {
@@ -564,14 +590,24 @@ object ProxyMetrics {
     @Synchronized
     fun sampleOutputSpread(requestId: String, count: Long, atMs: Long = System.currentTimeMillis()) {
         if (count <= 0) return
-        val startMs = requestStartTimes[requestId] ?: run { sampleOutput(count, atMs); return }
+        // Resume/replay guard. A client that resumes a session re-sends the
+        // conversation and the provider can repeat the same usage block, or
+        // report a running total instead of a per-chunk delta. Either way
+        // crediting `count` again would invent output that was never
+        // generated and spike tok/s. Only the increase is new output.
+        val previous = lastOutByRequest.put(requestId, count) ?: 0L
+        val fresh = count - previous
+        if (fresh <= 0L) return
+        val startMs = requestStartTimes[requestId]
+            ?: run { sampleOutputUnknownSpan(fresh, atMs); return }
         val spanSecs = ((atMs - startMs) / 1000).toInt()
         if (spanSecs <= 0) {
-            sampleOutput(count, atMs)
+            // Sub-second span: a single report of the whole response.
+            sampleOutputUnknownSpan(fresh, atMs)
             return
         }
         // Bound work and ring pressure; density stays honest for real spans.
-        val plan = spreadPlan(count, spanSecs)
+        val plan = spreadPlan(fresh, spanSecs)
         val endSec = atMs / 1000
         val base = endSec - plan.size + 1
         plan.forEachIndexed { i, c -> addToBucket(base + i, c) }
