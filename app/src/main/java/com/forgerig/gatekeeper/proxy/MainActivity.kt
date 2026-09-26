@@ -550,19 +550,25 @@ class MainActivity : AppCompatActivity() {
             // The view re-queries on every pan so the graph updates
             // immediately; this poll only feeds the live edge.
             if (chart.sampleProvider == null) {
-                chart.sampleProvider = { offSec ->
-                    ProxyMetrics.rateHistory(
-                        TokenRateView.WINDOW_SECS,
-                        System.currentTimeMillis() - offSec * 1000
-                    )
+                chart.sampleProvider = { offSec, endMs ->
+                    ProxyMetrics.rateHistory(TokenRateView.WINDOW_SECS, endMs)
                 }
             }
             if (!chart.isInteracting) {
+                // snap = false: the poll keeps the 350ms ease so bars
+                // settle into new data instead of jumping every 2s. The
+                // view's own pan frames snap (no animator) so the drag
+                // tracks the finger rather than restarting the ease on
+                // every pixel. One timestamp for the window, same helper
+                // the view uses, so the two can't diverge.
                 chart.setSamples(
                     ProxyMetrics.rateHistory(
                         TokenRateView.WINDOW_SECS,
-                        System.currentTimeMillis() - chart.offsetSec * 1000
-                    )
+                        TokenRateView.windowEndMs(
+                            System.currentTimeMillis(), chart.offsetSec
+                        )
+                    ),
+                    snap = false
                 )
             }
         }

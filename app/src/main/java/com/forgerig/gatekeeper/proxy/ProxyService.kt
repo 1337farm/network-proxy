@@ -2,7 +2,6 @@
 
 package com.forgerig.gatekeeper.proxy
 
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
@@ -140,7 +139,9 @@ class ProxyService : Service() {
         if (running.get() == 1) {
             if (intent?.getBooleanExtra(EXTRA_ONLY_IF_STOPPED, false) == true) {
                 // Ensure-running ping (app start): already up, don't flap.
-                updateNotification("Proxy running on 0.0.0.0:$port", true)
+                // Re-assert the foreground state (the guard below would
+                // otherwise skip it) but don't re-post an identical shade row.
+                updateNotification("Proxy running on 0.0.0.0:$port", true, forceForeground = true)
                 stateCallback?.invoke(true, null)
                 return START_STICKY
             }
@@ -155,10 +156,13 @@ class ProxyService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // Keep-alive on swipe: re-post the foreground notification so the
+        // Keep-alive on swipe: re-assert the foreground notification so the
         // proxy keeps serving. Stop only happens via the Stop button.
+        // forceForeground: the signature is normally unchanged, so the
+        // no-op guard in updateNotification would otherwise swallow this
+        // and the service would never re-enter the foreground.
         if (running.get() == 1) {
-            updateNotification("Proxy running on 0.0.0.0:$port", true)
+            updateNotification("Proxy running on 0.0.0.0:$port", true, forceForeground = true)
         }
         super.onTaskRemoved(rootIntent)
     }
@@ -1011,9 +1015,8 @@ class ProxyService : Service() {
     }
 
     /**
-     * Start the periodic self-ping (idempotent across restarts).
-     * The same 1 Hz cadence refreshes the notification so the status-bar
-     * tok/s stays live.
+     * Start the periodic self-ping and the notification refresh tick
+     * (idempotent across restarts). Both run on the same executor.
      */
     @Synchronized
     private fun scheduleHealth() {
@@ -1085,17 +1088,15 @@ class ProxyService : Service() {
     }
 
     /**
-     * Repost the running notification so the status-bar tok/s tracks the
-     * live rate. Cheap: [updateNotification] no-ops unless the value moved.
+     * Re-evaluate the running notification so the body tracks the live tok/s
+     * and uptime. Cheap: [updateNotification] no-ops (no notify, no
+     * startForeground) unless the rendered text moved.
      */
     private fun refreshNotification() {
         if (running.get() != 1) return
         updateNotification("Proxy running on 0.0.0.0:$port", true)
     }
 
-
-
-    /** Elapsed proxy uptime as a compact "1h 04m" / "12m 30s" string. */
     /**
      * Local addresses for the notification, cached briefly.
      *
@@ -1116,6 +1117,7 @@ class ProxyService : Service() {
         return fresh
     }
 
+    /** Elapsed proxy uptime as a compact "1h 04m" / "12m 30s" string. */
     private fun uptimeText(): String? {
         val started = startedAtMs
         if (started <= 0) return null
@@ -1145,9 +1147,17 @@ class ProxyService : Service() {
         }
     }
 
+    /**
+     * @param forceForeground re-assert `startForeground` even when the
+     *   rendered notification is byte-identical to the last post. Callers
+     *   that only want to keep the service in the foreground (keep-alive
+     *   re-posts) pass true and still skip the `notify` when nothing
+     *   changed; the normal 5s tick does not, so an idle proxy never
+     *   re-enters the foreground every tick.
+     */
     @Synchronized
-    private fun updateNotification(text: String, isRunning: Boolean) {
-        // Re-check under the lock: a 3s tick can pass the running test in
+    private fun updateNotification(text: String, isRunning: Boolean, forceForeground: Boolean = false) {
+        // Re-check under the lock: a tick can pass the running test in
         // refreshNotification and then be overtaken by stopProxy(), which
         // would otherwise re-post a non-dismissible "running" notification
         // and re-enter the foreground for a proxy that is down.
@@ -1161,9 +1171,12 @@ class ProxyService : Service() {
             NotificationText.plain(text)
         }
         // Skip the re-post entirely when nothing moved, so an idle proxy does
-        // not churn the shade (onlyAlertOnce also keeps it silent).
+        // not churn the shade (onlyAlertOnce also keeps it silent). A forced
+        // foreground re-assert still has to run the builder (it needs a
+        // Notification to hand to startForeground), it just skips notify().
         val signature = "$title|$port|${body.collapsed}|${body.expanded}|$tps"
-        if (signature == lastNotifSignature) return
+        val changed = signature != lastNotifSignature
+        if (!changed && !(forceForeground && isRunning)) return
         lastNotifSignature = signature
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -1189,19 +1202,17 @@ class ProxyService : Service() {
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-        // Running: the status-bar slot doubles as the tok/s readout, so the
-        // small icon is the live number next to wifi/cellular. Stopped: a
-        // plain glyph (setSmallIcon has Icon and Drawable overloads, so the
-        // two branches cannot share one call).
-        // Plain launcher icon: a bitmap small icon (a rendered tok/s
-        // number) is ignored by skins that force the app icon into that
-        // slot, so the rate lives in the notification body instead.
-        builder.setSmallIcon(R.mipmap.ic_launcher)
+        // Single-layer vector, not the adaptive launcher mipmap: the
+        // status-bar small-icon slot does no adaptive masking, so an
+        // adaptive icon renders oversized / as a solid block. A bitmap
+        // small icon is also ignored by skins that force the app icon
+        // into that slot, so the rate lives in the notification body.
+        builder.setSmallIcon(R.drawable.ic_stat_proxy)
         val notification = builder.build()
 
         val manager = getSystemService(NotificationManager::class.java)
         android.util.Log.i("NetworkProxy", "notification[$title]: ${body.collapsed}")
-        manager.notify(1, notification)
+        if (changed) manager.notify(1, notification)
         if (isRunning) startForeground(1, notification) else stopForeground(true)
     }
 

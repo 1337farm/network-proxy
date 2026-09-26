@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Status-bar small icon for the proxy service notification.
+
+  Deliberately NOT an adaptive icon: ic_launcher is a mipmap-anydpi-v26
+  adaptive icon (background + foreground layers), and the status-bar slot
+  does no adaptive masking/insetting, so it renders oversized or as a
+  solid block. This is a single-layer vector, 24dp (the small-icon slot
+  expects ~24dp of optical size), flat white so the system can tint it
+  with the shade's icon color.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.6"
+        android:pathData="M12,3 A9,9 0 1 1 11.99,3 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.6"
+        android:pathData="M3.3,12 L20.7,12" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M14.4,8.7 L20.6,12 L14.4,15.3 Z" />
+</vector>

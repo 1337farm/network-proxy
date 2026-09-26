@@ -16,7 +16,8 @@ object NotificationText {
     /**
      * Running-proxy body. The collapsed row is the LAN address plus the
      * live tok/s (the two things you actually need); everything else —
-     * the other interfaces and the uptime — is in the expanded text.
+     * the other interfaces, the uptime and the rate — is in the expanded
+     * text. The rate appears in both, uptime only when known.
      */
     fun running(ips: List<String>, port: Int, tps: Double = 0.0, uptime: String? = null): Body {
         val rate = "${tpsLabel(tps)} tok/s"
@@ -32,8 +33,12 @@ object NotificationText {
         }
         val expanded = buildString {
             append(ips.joinToString("\n") { "$it:$port" })
-            append("\n").append(uptimeLine(uptime))
-            if (uptime != null) append(" · ").append(rate)
+            // The rate is always present; the uptime line is only joined
+            // in when we have one (no stray blank line, and never at the
+            // cost of the rate).
+            val tail = uptimeLine(uptime)
+            append("\n")
+            if (tail.isEmpty()) append(rate) else append(tail).append(" · ").append(rate)
         }
         return Body(collapsed, expanded)
     }

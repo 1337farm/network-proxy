@@ -16,9 +16,11 @@ import android.view.animation.DecelerateInterpolator
  *   (0 = live edge). Drag horizontally to pan up to an hour back;
  *   tap to snap back to live. A LIVE / −MmSs chip shows the position.
  * - Buttery motion: bar heights ease toward new data (350ms
- *   decelerate) instead of jumping on every 2s poll. While a pan
- *   gesture is active ([isInteracting]), the host must not push new
- *   frames — they would snap the bars out from under the finger.
+ *   decelerate) instead of jumping on every 2s poll. Pan frames are
+ *   snapped (no animator) so a continuous drag tracks the finger
+ *   instead of restarting the ease on every pixel. While a pan gesture
+ *   is active ([isInteracting]), the host must not push new frames —
+ *   they would snap the bars out from under the finger.
  * - Readable labels: values live in a reserved right gutter that bars
  *   never enter; faint quartile gridlines + peak readout on top.
  */
@@ -44,6 +46,63 @@ class TokenRateView @JvmOverloads constructor(
             val maxBack = (MAX_BACK_SECS - WINDOW_SECS).toLong()
             return (downOffset + (dxPx / pps).toLong()).coerceIn(0L, maxBack)
         }
+
+        /**
+         * Should this touch be treated as the start of a pan? Past the
+         * [slopPx] dead zone *and* horizontally dominant.
+         *
+         * The direction test is the important half: a vertical swipe
+         * (|dy| >= |dx|) never becomes a pan, so the chart never claims
+         * the gesture and an enclosing ScrollView stays free to scroll
+         * the page instead of the drag being silently eaten. Pure so the
+         * decision is unit-testable without a device.
+         */
+        @JvmStatic
+        fun beginPan(dx: Float, dy: Float, slopPx: Float): Boolean {
+            val adx = if (dx < 0) -dx else dx
+            val ady = if (dy < 0) -dy else dy
+            return adx > slopPx && adx > ady
+        }
+
+        /**
+         * The single wall-clock instant a frame is anchored to: the
+         * window's last bucket ends here. One frame is computed from one
+         * timestamp — the drag frame and the poll that follows it can no
+         * longer straddle a second boundary and show two different windows.
+         */
+        @JvmStatic
+        fun windowEndMs(nowMs: Long, offsetSec: Long): Long = nowMs - offsetSec * 1000
+
+        /** Axis peak for [values]; never zero, so the scale cannot divide by 0. */
+        @JvmStatic
+        fun peakOf(values: List<Long>): Long = (values.maxOrNull() ?: 0L).coerceAtLeast(1L)
+
+        /**
+         * Values to 0..1 heights against [peak]. This *is* the frame the
+         * view shows, so a snapped frame is exactly the incoming values.
+         */
+        @JvmStatic
+        fun normalize(values: List<Long>, peak: Long): FloatArray {
+            val max = peak.toFloat()
+            return FloatArray(values.size) { i -> (values[i].toFloat() / max).coerceIn(0f, 1f) }
+        }
+
+        /**
+         * The old frame resized to [next]'s length so a shape change can
+         * be eased rather than popping: overlapping tail kept, any new
+         * buckets growing in from zero.
+         */
+        @JvmStatic
+        fun fitFrame(shown: FloatArray, next: FloatArray): FloatArray = when {
+            shown.size == next.size -> shown.copyOf()
+            shown.size > next.size -> shown.takeLast(next.size).toFloatArray()
+            else -> FloatArray(next.size - shown.size) { 0f } + shown
+        }
+
+        /** Eased frame at [t] in 0..1 between [from] and [to]. */
+        @JvmStatic
+        fun blend(from: FloatArray, to: FloatArray, t: Float): FloatArray =
+            FloatArray(to.size) { i -> from[i] + (to[i] - from[i]) * t }
     }
 
     /** Seconds behind live; 0 follows the edge. Survives data refreshes. */
@@ -55,20 +114,32 @@ class TokenRateView @JvmOverloads constructor(
         private set
 
     /**
-     * Pulls the window ending [offsetSec] seconds ago. The view calls this
-     * itself whenever the offset changes, so panning redraws with the data
-     * for the window you are actually looking at instead of the stale frame
-     * the host last pushed (which left the chart frozen mid-drag and only
-     * caught up on the next 2s poll after release).
+     * Pulls the window ending at [endMs] for [offsetSec] seconds back.
+     * The view calls this itself whenever the offset changes, so panning
+     * redraws with the data for the window you are actually looking at
+     * instead of the stale frame the host last pushed (which left the
+     * chart frozen mid-drag and only caught up on the next 2s poll after
+     * release).
+     *
+     * [endMs] is passed in rather than recomputed here so a frame and its
+     * axis labels are derived from one timestamp.
      */
-    var sampleProvider: ((offsetSec: Long) -> List<Long>)? = null
+    var sampleProvider: ((offsetSec: Long, endMs: Long) -> List<Long>)? = null
 
     private var shown: FloatArray = FloatArray(0) // eased 0..1 heights
     private var animator: ValueAnimator? = null
-    /** Absolute scale of the current frame (tokens/s at full height). */
+    /** Absolute scale of the displayed frame (tokens/s at full height). */
     private var lastMax: Long = 1L
+    /**
+     * Scale the in-flight ease is heading for. Held out of [lastMax]
+     * until the ease lands so the peak readout and quartile labels
+     * travel *with* the bars instead of jumping to the new window while
+     * the bars are still mid-blend.
+     */
+    private var pendingMax: Long = 1L
 
     private var downX = 0f
+    private var downY = 0f
     private var downOffset = 0L
     private var downMs = 0L
     private var dragging = false
@@ -84,32 +155,59 @@ class TokenRateView @JvmOverloads constructor(
     }
 
     /**
-     * New trailing samples (oldest-first, [WINDOW_SECS] long). Heights
-     * ease from current to new over 350ms instead of snapping.
+     * New trailing samples (oldest-first, [WINDOW_SECS] long).
+     *
+     * [snap] picks the frame straight in with no animator. Panning
+     * ([refreshWindow]) passes true: a continuous drag re-queries on
+     * every offset change, so a 350ms ease would be cancelled every few
+     * ms, never complete, and leave the bars permanently mid-blend and
+     * lagging the finger. The host poll passes false (the default) and
+     * keeps the 350ms decelerate so bars settle into new data rather than
+     * jumping on every 2s tick.
      */
-    fun setSamples(values: List<Long>) {
-        lastMax = (values.maxOrNull() ?: 0L).coerceAtLeast(1L)
-        val max = lastMax.toFloat()
-        val next = FloatArray(values.size) { i -> (values[i].toFloat() / max).coerceIn(0f, 1f) }
-        val from = when {
-            shown.size == next.size -> shown.copyOf()
-            shown.size > next.size -> shown.takeLast(next.size).toFloatArray()
-            else -> FloatArray(next.size - shown.size) { 0f } + shown
-        }
+    fun setSamples(values: List<Long>, snap: Boolean = false) {
+        val peak = peakOf(values)
+        val next = normalize(values, peak)
+        val from = fitFrame(shown, next)
         animator?.cancel()
-        if (from.contentEquals(next) || !isAttachedToWindow) {
+        val shapeChanged = !from.contentEquals(next)
+        // No animator is scheduled when snapping, when detached, or when
+        // the shape is unchanged — so in all three the displayed frame
+        // already *is* the new frame and the axis may commit now.
+        if (snap || !isAttachedToWindow || !shapeChanged) {
             shown = next
+            lastMax = peak
+            pendingMax = peak
             invalidate()
             return
         }
+        pendingMax = peak
+        var completed = false
         animator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 350
             interpolator = DecelerateInterpolator()
             addUpdateListener { a ->
-                val t = a.animatedValue as Float
-                shown = FloatArray(next.size) { i -> from[i] + (next[i] - from[i]) * t }
+                shown = blend(from, next, a.animatedValue as Float)
                 invalidate()
             }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(a: android.animation.Animator) {
+                    // Only a completed ease promotes the new scale; a
+                    // cancel means a newer frame superseded this one.
+                    if (completed) {
+                        shown = next
+                        lastMax = pendingMax
+                        invalidate()
+                    }
+                }
+
+                override fun onAnimationCancel(a: android.animation.Animator) {
+                    completed = false
+                }
+            })
+            // Before start(): start() dispatches on a later frame, so the
+            // flag is already observable by the time any callback runs.
+            completed = true
             start()
         }
     }
@@ -120,14 +218,18 @@ class TokenRateView @JvmOverloads constructor(
     }
 
     /**
-     * Re-query the current window and redraw. Called on every offset change
-     * (drag, snap-back, release) so the graph is never showing data from
-     * the wrong time range.
+     * Re-query the current window and redraw. Called on touch-down, on
+     * every offset change (drag, snap-back) and on gesture end, so the
+     * graph is never showing data from the wrong time range — and the
+     * first frame of a gesture is never the one the last poll left behind.
      */
     private fun refreshWindow() {
         val p = sampleProvider ?: return
-        val endMs = System.currentTimeMillis() - offsetSec * 1000
-        setSamples(p(offsetSec))
+        // One timestamp, used for the fetch *and* passed down, so the
+        // frame cannot straddle a second boundary relative to the next
+        // poll's frame.
+        val endMs = windowEndMs(System.currentTimeMillis(), offsetSec)
+        setSamples(p(offsetSec, endMs), snap = true)
         invalidate()
     }
 
@@ -135,17 +237,25 @@ class TokenRateView @JvmOverloads constructor(
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 downX = event.x
+                downY = event.y
                 downOffset = offsetSec
                 downMs = System.currentTimeMillis()
                 dragging = false
                 isInteracting = true
-                parent?.requestDisallowInterceptTouchEvent(true)
+                // Anchor the gesture on the window it actually started
+                // on, not on whatever the last poll pushed.
+                refreshWindow()
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
                 val dx = event.x - downX
-                if (!dragging && kotlin.math.abs(dx) > 8 * resources.displayMetrics.density) {
+                val dy = event.y - downY
+                if (!dragging && beginPan(dx, dy, 8 * resources.displayMetrics.density)) {
                     dragging = true
+                    // Claim the gesture only now that it is a horizontal
+                    // pan. Disallowing on DOWN would starve an enclosing
+                    // ScrollView of vertical drags over the chart.
+                    parent?.requestDisallowInterceptTouchEvent(true)
                 }
                 if (dragging) {
                     val pxPerSec = ((width - gutterPx()) / WINDOW_SECS.toFloat())
@@ -166,6 +276,9 @@ class TokenRateView @JvmOverloads constructor(
             // lifting first would strand isInteracting=true and freeze
             // chart updates. Only a clean single-tap snaps back to live.
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL, MotionEvent.ACTION_POINTER_UP -> {
+                // Hand the gesture back so the parent can scroll again
+                // (and so a ScrollView that stole a vertical drag sees a
+                // consistent disallow flag on the next one).
                 parent?.requestDisallowInterceptTouchEvent(false)
                 val tap = !dragging && System.currentTimeMillis() - downMs < 300 &&
                     event.actionMasked == MotionEvent.ACTION_UP

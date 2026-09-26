@@ -595,8 +595,8 @@ object ProxyMetrics {
      * last) instead of the arrival second. Usage totals arrive in the
      * final chunk, so arrival-bucketing fabricates spikes (2k tokens
      * after a 40s think reads as 2000 tok/s instead of ~49 tok/s).
-     * Even split, remainder to the last bucket. Falls back to the
-     * arrival second when the request start is unknown.
+     * Even split, remainder to the last bucket. Falls back to a
+     * [MIN_SPAN_SECS] smear when the request start is unknown.
      */
     @Synchronized
     fun sampleOutputSpread(requestId: String, count: Long, atMs: Long = System.currentTimeMillis()) {
@@ -604,29 +604,40 @@ object ProxyMetrics {
         // Cache-read/cache-write never reach here: recordUsage passes
         // found[1] (output_tokens) alone.
         //
-        // A monotonic per-requestId watermark was tried here to de-duplicate
-        // replayed usage blocks on session resume, but requestId is minted
-        // per client CONNECTION, so every response on a keep-alive tunnel was
-        // compared against the previous one and real output was silently
-        // dropped (tok/s read 0 while actively streaming, and lower-than-
-        // previous completions vanished entirely). Reporting the provider's
-        // number verbatim is the lesser evil; the multi-thousand tok/s spikes
-        // are handled by spreading unknown-span reports instead.
-        val fresh = count
-        val startMs = requestStartTimes[requestId]
-            ?: run { sampleOutputUnknownSpan(fresh, atMs); return }
-        val spanSecs = ((atMs - startMs) / 1000).toInt()
-        if (spanSecs <= 0) {
-            // Sub-second span: a single report of the whole response.
-            sampleOutputUnknownSpan(fresh, atMs)
-            return
-        }
+        // De-duplication of a provider's re-reported usage blocks does NOT
+        // happen here. A monotonic per-requestId watermark was tried and
+        // removed: requestId is minted per client CONNECTION, so every
+        // response on a keep-alive tunnel was diffed against the previous
+        // one and real output was silently dropped. The dedupe now lives in
+        // StreamingUsage, whose lifetime is exactly one response stream, and
+        // every report reaching this method is already a delta to credit.
+        val startMs = requestStartTimes[requestId] ?: 0L
+        val spanSecs = if (startMs > 0) ((atMs - startMs) / 1000).toInt() else 0
         // Bound work and ring pressure; density stays honest for real spans.
-        val plan = spreadPlan(fresh, spanSecs)
+        val plan = spreadPlan(count, smoothedSpanSecs(spanSecs))
         val endSec = atMs / 1000
         val base = endSec - plan.size + 1
         plan.forEachIndexed { i, c -> addToBucket(base + i, c) }
     }
+
+    /**
+     * Effective width, in seconds, of the smear one response's output credit
+     * is spread across: the larger of the measured span and [MIN_SPAN_SECS].
+     *
+     * A completion that took 1-3s used to be spread over just those 1-3
+     * seconds, so it read as its full count in one bucket (2000 tokens ->
+     * "2000 tok/s") even though generation took seconds. The obvious fix — a
+     * hard tok/s ceiling — was rejected: it would clamp a genuinely fast
+     * model and silently under-report real rates, and the ceiling would have
+     * to be picked arbitrarily. Instead this bounds the response's
+     * CONCENTRATION: density can never exceed count/MIN_SPAN_SECS for a short
+     * response, while the total is unchanged and a long response is still
+     * attributed over its true span, so a high-but-real rate (many tokens AND
+     * a long span) keeps its actual tok/s. A 0/unknown span keeps the
+     * existing [MIN_SPAN_SECS] unknown-span behaviour.
+     */
+    fun smoothedSpanSecs(spanSecs: Int): Int =
+        if (spanSecs <= 0) MIN_SPAN_SECS else maxOf(spanSecs, MIN_SPAN_SECS)
 
     /**
      * Pure spread plan (oldest-first per-second shares): even split, the
@@ -644,8 +655,11 @@ object ProxyMetrics {
      * Single choke point for usage accounting: credits the token tallies
      * (split by host AND model) AND the rate sampler together, so the
      * displays can never drift apart. [found] is the scanner quad
-     * (input, output, cacheRead, cacheWrite). [requestId] null = tally
-     * only (opaque paths with no request context).
+     * (input, output, cacheRead, cacheWrite) — already de-duplicated into
+     * DELTAS by [StreamingUsage] (a cumulative reporter's running total is
+     * credited as the increase, never verbatim), so this credits the quad
+     * exactly as given. [requestId] null = tally only (opaque paths with no
+     * request context).
      */
     @Synchronized
     fun recordUsage(host: String, model: String, requestId: String?, found: LongArray) {
@@ -736,6 +750,9 @@ object ProxyMetrics {
     // usage-block scanner: finds Anthropic + OpenAI token fields in a
     // buffered body (plain JSON or SSE stream chunk). Returns
     // (input, output, cacheRead, cacheWrite).
+
+    /** "No value credited yet" marker for StreamingUsage's per-key trackers. */
+    private const val USAGE_UNSET = -1L
     private val tokNum = { key: String, body: String ->
         Regex(""""$key"\s*:\s*(\d+)""").findAll(body).map { it.groupValues[1].toLong() }.sum()
     }
@@ -786,6 +803,38 @@ object ProxyMetrics {
      * twice. A match ending at the very end of the buffer is therefore
      * deferred (remembered as [pendingText]) and resolved on the next
      * feed — or via [flush] at stream end.
+     *
+     * CUMULATIVE REPORTERS: Anthropic-style SSE re-reports
+     * `usage.output_tokens` as a RUNNING TOTAL in every `message_delta`
+     * frame (12, then 40, then 150 for a 150-token completion), so crediting
+     * each frame verbatim summed to 202 and the rate read ~35% hot — worse
+     * with every extra frame, which is the 2k+ tok/s spike the user saw.
+     * Each newly matched value is therefore credited as a DELTA against the
+     * last value seen for that key ([addMatch]):
+     *
+     *  - value >= last  -> same response still running: credit the increase
+     *  - value <  last  -> a NEW response has started on this connection and
+     *    its running total restarted: credit the full value
+     *  - an exactly repeated value credits 0 (replay / duplicate frame)
+     *
+     * This state is per SCANNER INSTANCE, i.e. per response stream, and is
+     * cleared by [flush]. It is deliberately NOT keyed on requestId: that id
+     * is minted per client CONNECTION, so a per-requestId watermark diffed
+     * every response on a keep-alive tunnel against the previous one and
+     * swallowed real tokens (the regression this design replaces).
+     *
+     * Providers that report a single one-shot usage block (OpenAI) are
+     * unaffected: their only match per response finds last unset and is
+     * credited in full.
+     *
+     * Known limit of the rule (a decrease is the only in-band signal that a
+     * response ended): on one keep-alive connection, a per-response one-shot
+     * field whose value is LARGER than the previous response's for the same key
+     * (a growing conversation's `input_tokens`/`prompt_tokens`) is credited as
+     * the difference, not the sum. A real fix needs an explicit per-response
+     * reset from the relay, which is a ProxyService seam, not scanner-local
+     * state; until then the conservative direction is to under-count a
+     * one-shot input repeat rather than re-credit a cumulative total.
      */
     class StreamingUsage {
         // Carry is decoded CHARS (not bytes) so every index below is exact;
@@ -801,6 +850,13 @@ object ProxyMetrics {
             "prompt_tokens", "completion_tokens", "cached_tokens"
         ).map { key -> key to Regex(""""$key"\s*:\s*(\d+)(?!\d)""") }
         private val keyValue = Regex(""""(\w+)"\s*:\s*(\d+)$""")
+        /**
+         * Last value credited per quad slot (in, out, cacheRead, cacheWrite)
+         * for the response stream this scanner is watching. [USAGE_UNSET]
+         * means "nothing credited yet for this key" — a first sighting is
+         * always credited in full.
+         */
+        private val lastSeen = LongArray(4) { USAGE_UNSET }
 
         fun feed(chunk: ByteArray, len: Int): LongArray {
             val out = LongArray(4)
@@ -842,23 +898,47 @@ object ProxyMetrics {
             return out
         }
 
-        /** Count a deferred trailing match at stream end. Idempotent. */
+        /**
+         * Credit a deferred trailing match and close the response boundary.
+         *
+         * Idempotent: the pending match is consumed (nulled) by the call that
+         * credits it, and a match already credited by [feed] never reaches
+         * here, so a second [flush] returns zeros. After crediting, the
+         * per-key trackers are cleared because everything seen so far belongs
+         * to the response that just ended — anything this scanner matches
+         * next is credited from scratch rather than diffed against a total
+         * that is no longer running.
+         */
         fun flush(): LongArray {
             val out = LongArray(4)
             pendingText?.let { addMatch(out, it) }
             pendingText = null
+            lastSeen.fill(USAGE_UNSET)
             return out
         }
 
+        /**
+         * Credit one matched `"key":digits` span as a DELTA against the last
+         * value seen for that key. See the class doc for the rule; the
+         * single-slot arithmetic is the whole fix.
+         */
         private fun addMatch(out: LongArray, matchText: String) {
             val m = keyValue.find(matchText) ?: return
             val value = m.groupValues[2].toLongOrNull() ?: return
-            when (m.groupValues[1]) {
-                "input_tokens", "prompt_tokens" -> out[0] += value
-                "output_tokens", "completion_tokens" -> out[1] += value
-                "cache_read_input_tokens", "cached_tokens" -> out[2] += value
-                "cache_creation_input_tokens" -> out[3] += value
+            val slot = when (m.groupValues[1]) {
+                "input_tokens", "prompt_tokens" -> 0
+                "output_tokens", "completion_tokens" -> 1
+                "cache_read_input_tokens", "cached_tokens" -> 2
+                "cache_creation_input_tokens" -> 3
+                else -> return
             }
+            val prev = lastSeen[slot]
+            // No prior value, or the running total restarted (new response on
+            // this connection): credit in full. Otherwise credit the increase,
+            // which is 0 for an exact repeat.
+            val delta = if (prev == USAGE_UNSET || value < prev) value else value - prev
+            lastSeen[slot] = value
+            out[slot] += delta
         }
     }
 
