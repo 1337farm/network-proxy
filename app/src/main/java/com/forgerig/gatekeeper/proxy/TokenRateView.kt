@@ -31,6 +31,19 @@ class TokenRateView @JvmOverloads constructor(
     companion object {
         const val WINDOW_SECS = 120
         const val MAX_BACK_SECS = 3600
+
+        /**
+         * Pan mapping, pure so the direction is unit-tested: dragging right
+         * moves the window *back* in time (the content follows the finger),
+         * dragging left returns toward live. Clamped so the window always
+         * fits inside the retained hour.
+         */
+        @JvmStatic
+        fun panOffset(downOffset: Long, dxPx: Float, pxPerSec: Float): Long {
+            val pps = if (pxPerSec < 1f) 1f else pxPerSec
+            val maxBack = (MAX_BACK_SECS - WINDOW_SECS).toLong()
+            return (downOffset + (dxPx / pps).toLong()).coerceIn(0L, maxBack)
+        }
     }
 
     /** Seconds behind live; 0 follows the edge. Survives data refreshes. */
@@ -40,6 +53,15 @@ class TokenRateView @JvmOverloads constructor(
     /** True between touch-down and release: host should not push new frames. */
     var isInteracting: Boolean = false
         private set
+
+    /**
+     * Pulls the window ending [offsetSec] seconds ago. The view calls this
+     * itself whenever the offset changes, so panning redraws with the data
+     * for the window you are actually looking at instead of the stale frame
+     * the host last pushed (which left the chart frozen mid-drag and only
+     * caught up on the next 2s poll after release).
+     */
+    var sampleProvider: ((offsetSec: Long) -> List<Long>)? = null
 
     private var shown: FloatArray = FloatArray(0) // eased 0..1 heights
     private var animator: ValueAnimator? = null
@@ -97,6 +119,18 @@ class TokenRateView @JvmOverloads constructor(
         super.onDetachedFromWindow()
     }
 
+    /**
+     * Re-query the current window and redraw. Called on every offset change
+     * (drag, snap-back, release) so the graph is never showing data from
+     * the wrong time range.
+     */
+    private fun refreshWindow() {
+        val p = sampleProvider ?: return
+        val endMs = System.currentTimeMillis() - offsetSec * 1000
+        setSamples(p(offsetSec))
+        invalidate()
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
@@ -116,9 +150,14 @@ class TokenRateView @JvmOverloads constructor(
                 if (dragging) {
                     val pxPerSec = ((width - gutterPx()) / WINDOW_SECS.toFloat())
                         .coerceAtLeast(1f)
-                    offsetSec = (downOffset - (dx / pxPerSec).toLong())
-                        .coerceIn(0, MAX_BACK_SECS - WINDOW_SECS.toLong())
-                    invalidate()
+                    val next = panOffset(downOffset, dx, pxPerSec)
+                    if (next != offsetSec) {
+                        offsetSec = next
+                        // Immediate: fetch the window now rather than waiting
+                        // for the next poll, so the bars under the finger are
+                        // the ones being panned to.
+                        refreshWindow()
+                    }
                 }
                 return true
             }
@@ -136,6 +175,8 @@ class TokenRateView @JvmOverloads constructor(
                     offsetSec = 0 // snap back to live
                     invalidate()
                 }
+                // Settle on real data for wherever the gesture ended.
+                refreshWindow()
                 return true
             }
         }

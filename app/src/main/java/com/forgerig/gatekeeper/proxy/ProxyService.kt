@@ -40,6 +40,8 @@ class ProxyService : Service() {
         /** Health self-ping cadence + consecutive failures before self-restart. */
         const val HEALTH_INTERVAL_SEC = 30L
         const val HEALTH_MAX_FAILS = 3
+        /** Notification refresh cadence: keeps the status-bar tok/s live. */
+        private const val NOTIFY_TICK_SEC = 1L
         /** Notification channel: DEFAULT importance so "proxy is up" is visible. */
         private const val CHANNEL_ID = "proxy_status"
 
@@ -64,6 +66,10 @@ class ProxyService : Service() {
     // Health self-ping: proves the listener accepts connections; restarts
     // the listener (not the process) after consecutive failures.
     private var healthExec: java.util.concurrent.ScheduledExecutorService? = null
+    /** Wall-clock start of the current run, for the notification's uptime. */
+    @Volatile private var startedAtMs: Long = 0L
+    /** Last posted notification signature; suppresses no-op re-posts. */
+    @Volatile private var lastNotifSignature: String = ""
     private val healthFails = AtomicInteger(0)
     @Volatile private var lastHealthOkMs: Long = 0L
     private var statsCallback: ((Int, Long, Int, Int) -> Unit)? = null
@@ -148,6 +154,8 @@ class ProxyService : Service() {
     }
 
     private fun startProxy(port: Int) {
+        startedAtMs = System.currentTimeMillis()
+        lastNotifSignature = ""
         val builder = OkHttpClient.Builder()
             .connectTimeout(30_000, TimeUnit.MILLISECONDS)
             .readTimeout(120_000, TimeUnit.MILLISECONDS)
@@ -992,7 +1000,11 @@ class ProxyService : Service() {
         return "degraded ($fails/$HEALTH_MAX_FAILS)"
     }
 
-    /** Start the periodic self-ping (idempotent across restarts). */
+    /**
+     * Start the periodic self-ping (idempotent across restarts).
+     * The same 1 Hz cadence refreshes the notification so the status-bar
+     * tok/s stays live.
+     */
     @Synchronized
     private fun scheduleHealth() {
         if (healthExec != null) return
@@ -1001,6 +1013,10 @@ class ProxyService : Service() {
         exec.scheduleAtFixedRate(
             { healthPing() },
             HEALTH_INTERVAL_SEC, HEALTH_INTERVAL_SEC, TimeUnit.SECONDS
+        )
+        exec.scheduleAtFixedRate(
+            { refreshNotification() },
+            NOTIFY_TICK_SEC, NOTIFY_TICK_SEC, TimeUnit.SECONDS
         )
     }
 
@@ -1046,6 +1062,33 @@ class ProxyService : Service() {
         stateCallback?.invoke(false, null)
     }
 
+    /**
+     * Repost the running notification so the status-bar tok/s tracks the
+     * live rate. Cheap: [updateNotification] no-ops unless the value moved.
+     */
+    private fun refreshNotification() {
+        if (running.get() != 1) return
+        updateNotification("Proxy running on 0.0.0.0:$port", true)
+    }
+
+    /** Status-bar icon edge in px, from the system density. */
+    private fun iconSizePx(): Int =
+        (24 * resources.displayMetrics.density).toInt().coerceIn(48, 192)
+
+    /** Elapsed proxy uptime as a compact "1h 04m" / "12m 30s" string. */
+    private fun uptimeText(): String? {
+        val started = startedAtMs
+        if (started <= 0) return null
+        val s = (System.currentTimeMillis() - started) / 1000
+        if (s < 0) return null
+        val h = s / 3600
+        val m = (s % 3600) / 60
+        val sec = s % 60
+        return if (h > 0) String.format(java.util.Locale.US, "%dh %02dm", h, m)
+        else if (m > 0) String.format(java.util.Locale.US, "%dm %02ds", m, sec)
+        else String.format(java.util.Locale.US, "%ds", sec)
+    }
+
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = getSystemService(NotificationManager::class.java)
@@ -1064,29 +1107,57 @@ class ProxyService : Service() {
 
     private fun updateNotification(text: String, isRunning: Boolean) {
         val port = this.port
+        val tps = if (isRunning) ProxyMetrics.outputTokensPerSecond() else 0.0
         val title = if (isRunning) "Network Proxy running" else "Network Proxy stopped"
-        val detail = if (isRunning) {
-            val ips = LocalIps.list()
-            // The collapsed row is what people actually read, so it has to
-            // carry an address: the bind address (0.0.0.0) is useless to
-            // anyone pointing a client at this proxy.
-            val head = if (ips.isEmpty()) "listening on 0.0.0.0:$port" else "on $port  " + ips.joinToString("  ") { "$it:$port" }
-            "$head\nvia $text"
-        } else text
+        val body = if (isRunning) {
+            NotificationText.running(LocalIps.list(), port, tps, uptimeText())
+        } else {
+            NotificationText.plain(text)
+        }
+        // The status-bar slot shows tok/s next to wifi/cellular, so skip the
+        // re-post entirely when nothing moved (onlyAlertOnce also keeps it
+        // silent, but there is no reason to churn the notification shade).
+        val signature = "$title|$port|${body.collapsed}|$tps"
+        if (signature == lastNotifSignature) return
+        lastNotifSignature = signature
 
-        val style = NotificationCompat.BigTextStyle().bigText(detail)
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        val iconLabel = if (isRunning) StatusBarIcon.label(tps) else ""
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
-            .setContentText(detail.lineSequence().first())
-            .setStyle(style)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentText(body.collapsed)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body.expanded))
+            // Non-dismissible while the proxy runs: ongoing keeps it out of
+            // the swipe-away gesture, and a null delete intent means there is
+            // no dismiss action behind it either. It disappears only when the
+            // service actually stops.
             .setOngoing(isRunning)
+            .setAutoCancel(false)
+            .setDeleteIntent(null)
+            // Tapping the notification opens the app.
+            .setContentIntent(
+                android.app.PendingIntent.getActivity(
+                    this, 0,
+                    Intent(this, MainActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+                    android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT
+                )
+            )
             .setOnlyAlertOnce(true)
+            .setShowWhen(false)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .build()
+        // Running: the status-bar slot doubles as the tok/s readout, so the
+        // small icon is the live number next to wifi/cellular. Stopped: a
+        // plain glyph (setSmallIcon has Icon and Drawable overloads, so the
+        // two branches cannot share one call).
+        if (isRunning) {
+            builder.setSmallIcon(StatusBarIcon.render(iconLabel, iconSizePx()))
+        } else {
+            builder.setSmallIcon(android.R.drawable.ic_dialog_info)
+        }
+        val notification = builder.build()
 
         val manager = getSystemService(NotificationManager::class.java)
-        android.util.Log.i("NetworkProxy", "notification[$title]: ${detail.replace('\n', ' ')}")
+        android.util.Log.i("NetworkProxy", "notification[$title]: ${body.collapsed}")
         manager.notify(1, notification)
         if (isRunning) startForeground(1, notification) else stopForeground(true)
     }

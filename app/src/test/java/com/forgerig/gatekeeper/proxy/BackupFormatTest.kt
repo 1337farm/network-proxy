@@ -1,5 +1,6 @@
 package com.forgerig.gatekeeper.proxy
 
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -160,6 +161,117 @@ class SessionTitleTest {
         assertEquals("""{"a":1}""", String(SessionTracker.jsonBody(withHead), Charsets.UTF_8))
         // No header terminator and not a body -> nothing usable.
         assertEquals(0, SessionTracker.jsonBody(bytes("GET /x HTTP/1.1\r\nH: v")).size)
+    }
+}
+
+class StatusBarIconLabelTest {
+    @Test
+    fun compactLabels() {
+        assertEquals("0", StatusBarIcon.label(0.0))
+        assertEquals("0", StatusBarIcon.label(-1.0))
+        assertEquals("1.2", StatusBarIcon.label(1.24))
+        assertEquals("9.9", StatusBarIcon.label(9.94))
+        assertEquals("92", StatusBarIcon.label(91.8))
+        assertEquals("999", StatusBarIcon.label(998.6))
+        assertEquals("1.2k", StatusBarIcon.label(1234.0))
+    }
+
+    @Test
+    fun labelsStayShortEnoughForTheStatusBar() {
+        for (tps in doubleArrayOf(0.0, 5.0, 42.0, 300.0, 9999.0)) {
+            assertTrue("label too wide: " + StatusBarIcon.label(tps), StatusBarIcon.label(tps).length <= 5)
+        }
+    }
+}
+
+/** Pan direction was inverted: dragging right must go back in time. */
+class RateChartPanTest {
+    private val pps = 2f // 2 px per second of history
+
+    @Test
+    fun draggingRightGoesBackInTime() {
+        assertEquals(10L, TokenRateView.panOffset(0L, 20f, pps))
+    }
+
+    @Test
+    fun draggingLeftReturnsTowardLive() {
+        assertEquals(0L, TokenRateView.panOffset(30L, -60f, pps))
+    }
+
+    @Test
+    fun clampsAtTheLiveEdge() {
+        assertEquals(0L, TokenRateView.panOffset(0L, -500f, pps))
+    }
+
+    @Test
+    fun clampsAtTheRetentionLimit() {
+        val maxBack = (TokenRateView.MAX_BACK_SECS - TokenRateView.WINDOW_SECS).toLong()
+        assertEquals(maxBack, TokenRateView.panOffset(0L, 1_000_000f, pps))
+    }
+
+    @Test
+    fun zeroPixelScaleFallsBackToOnePixelPerSecond() {
+        // Floor instead of /0: a 10px drag is then 10s of history.
+        assertEquals(10L, TokenRateView.panOffset(0L, 10f, 0f))
+        assertEquals(10L, TokenRateView.panOffset(0L, 10f, -5f))
+    }
+}
+
+class NotificationTextTest {
+    @Test
+    fun collapsedRowCarriesTheRate() {
+        val b = NotificationText.running(listOf("100.81.194.26", "192.168.68.126"), 3128, 91.8, "1h 04m")
+        assertEquals("192.168.68.126:3128 · 92 tok/s  +1 more", b.collapsed)
+        // Expanded: every address, then uptime + rate.
+        assertTrue(b.expanded.contains("100.81.194.26:3128"))
+        assertTrue(b.expanded.contains("192.168.68.126:3128"))
+        assertTrue(b.expanded.contains("up 1h 04m"))
+        assertTrue(b.expanded.contains("92 tok/s"))
+    }
+
+    @Test
+    fun idleRateStillRenders() {
+        val b = NotificationText.running(listOf("192.168.1.5"), 3128, 0.0, "12s")
+        assertEquals("192.168.1.5:3128 · 0.0 tok/s", b.collapsed)
+    }
+
+    @Test
+    fun noUptimeOmitsTheLine() {
+        val b = NotificationText.running(listOf("192.168.1.5"), 3128, 5.0, null)
+        assertEquals("192.168.1.5:3128 · 5.0 tok/s", b.collapsed)
+        assertFalse(b.expanded.contains("up "))
+    }
+
+    @Test
+    fun noAddressesFallsBackToTheBindAddress() {
+        val b = NotificationText.running(emptyList(), 8080, 3.0, "5s")
+        assertEquals("listening on 0.0.0.0:8080 · 3.0 tok/s", b.collapsed)
+    }
+}
+
+class LocalIpsPrimaryTest {
+    @Test
+    fun prefersTheLanAddress() {
+        assertEquals(
+            "192.168.68.126",
+            LocalIps.primary(listOf("100.81.194.26", "172.30.197.213", "192.168.68.126"))
+        )
+    }
+
+    @Test
+    fun fallsBackThroughPrivateRanges() {
+        assertEquals("10.0.0.5", LocalIps.primary(listOf("100.81.1.1", "10.0.0.5")))
+        assertEquals("172.16.0.2", LocalIps.primary(listOf("100.81.1.1", "172.16.0.2")))
+    }
+
+    @Test
+    fun publicAddressIsUsedWhenThereIsNoPrivateOne() {
+        assertEquals("100.81.1.1", LocalIps.primary(listOf("100.81.1.1")))
+    }
+
+    @Test
+    fun emptyListHasNoPrimary() {
+        assertEquals(null, LocalIps.primary(emptyList()))
     }
 }
 

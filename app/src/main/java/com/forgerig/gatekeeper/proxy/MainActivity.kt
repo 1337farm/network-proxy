@@ -544,6 +544,16 @@ class MainActivity : AppCompatActivity() {
         // While a pan gesture is active the view owns its frame — pushing
         // poll data mid-drag would snap the bars out from under the finger.
         findViewById<TokenRateView>(R.id.rateChart)?.let { chart ->
+            // The view re-queries on every pan so the graph updates
+            // immediately; this poll only feeds the live edge.
+            if (chart.sampleProvider == null) {
+                chart.sampleProvider = { offSec ->
+                    ProxyMetrics.rateHistory(
+                        TokenRateView.WINDOW_SECS,
+                        System.currentTimeMillis() - offSec * 1000
+                    )
+                }
+            }
             if (!chart.isInteracting) {
                 chart.setSamples(
                     ProxyMetrics.rateHistory(
