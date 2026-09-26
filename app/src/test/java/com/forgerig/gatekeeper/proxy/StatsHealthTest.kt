@@ -74,7 +74,9 @@ class StatsHealthTest {
         assertEquals(listOf(3L, 3L, 4L), ProxyMetrics.spreadPlan(10, 3))
         assertEquals(listOf(7L), ProxyMetrics.spreadPlan(7, 0))
         assertEquals(emptyList<Long>(), ProxyMetrics.spreadPlan(0, 10))
-        assertEquals(ProxyMetrics.RATE_HISTORY_SECS, ProxyMetrics.spreadPlan(600, 9999).size)
+        // Capped so one response cannot append thousands of buckets and evict
+        // every other stream's real history.
+        assertEquals(ProxyMetrics.MAX_SPREAD_SECS, ProxyMetrics.spreadPlan(600, 9999).size)
     }
 
     @Test

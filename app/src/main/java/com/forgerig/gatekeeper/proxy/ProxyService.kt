@@ -1013,12 +1013,23 @@ class ProxyService : Service() {
         if (healthExec != null) return
         val exec = Executors.newSingleThreadScheduledExecutor()
         healthExec = exec
+        // scheduleAtFixedRate silently stops running a task that throws, so
+        // both are wrapped: an uncaught exception here would permanently
+        // disable health self-restarting for the life of the process.
         exec.scheduleAtFixedRate(
-            { healthPing() },
+            {
+                try { healthPing() } catch (t: Throwable) {
+                    android.util.Log.w("NetworkProxy", "health tick failed", t)
+                }
+            },
             HEALTH_INTERVAL_SEC, HEALTH_INTERVAL_SEC, TimeUnit.SECONDS
         )
         exec.scheduleAtFixedRate(
-            { refreshNotification() },
+            {
+                try { refreshNotification() } catch (t: Throwable) {
+                    android.util.Log.w("NetworkProxy", "notification tick failed", t)
+                }
+            },
             NOTIFY_TICK_SEC, NOTIFY_TICK_SEC, TimeUnit.SECONDS
         )
     }
@@ -1046,6 +1057,7 @@ class ProxyService : Service() {
         }
     }
 
+    @Synchronized
     private fun stopProxy(cancelHealth: Boolean = true) {
         running.set(0)
         if (cancelHealth) {
@@ -1106,7 +1118,13 @@ class ProxyService : Service() {
         }
     }
 
+    @Synchronized
     private fun updateNotification(text: String, isRunning: Boolean) {
+        // Re-check under the lock: a 3s tick can pass the running test in
+        // refreshNotification and then be overtaken by stopProxy(), which
+        // would otherwise re-post a non-dismissible "running" notification
+        // and re-enter the foreground for a proxy that is down.
+        if (isRunning && running.get() != 1) return
         val port = this.port
         val tps = if (isRunning) ProxyMetrics.outputTokensPerSecond() else 0.0
         val title = if (isRunning) "Network Proxy running" else "Network Proxy stopped"
@@ -1115,10 +1133,9 @@ class ProxyService : Service() {
         } else {
             NotificationText.plain(text)
         }
-        // The status-bar slot shows tok/s next to wifi/cellular, so skip the
-        // re-post entirely when nothing moved (onlyAlertOnce also keeps it
-        // silent, but there is no reason to churn the notification shade).
-        val signature = "$title|$port|${body.collapsed}|$tps"
+        // Skip the re-post entirely when nothing moved, so an idle proxy does
+        // not churn the shade (onlyAlertOnce also keeps it silent).
+        val signature = "$title|$port|${body.collapsed}|${body.expanded}|$tps"
         if (signature == lastNotifSignature) return
         lastNotifSignature = signature
 

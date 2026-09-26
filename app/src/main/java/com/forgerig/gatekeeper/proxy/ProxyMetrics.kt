@@ -179,7 +179,6 @@ object ProxyMetrics {
     private val sessionStartTimes = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val requestStartTimes = java.util.concurrent.ConcurrentHashMap<String, Long>()
     /** Last output total seen per request, so replays/resumes are not re-credited. */
-    private val lastOutByRequest = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val scenarioCounts = java.util.concurrent.ConcurrentHashMap<String, Int>()
     private val retryCounts = java.util.concurrent.ConcurrentHashMap<String, Int>()
     private val sessionMetrics = java.util.concurrent.ConcurrentHashMap<String, SessionMetrics>()
@@ -390,7 +389,6 @@ object ProxyMetrics {
     fun clear() {
         sessionStartTimes.clear()
         requestStartTimes.clear()
-        lastOutByRequest.clear()
         scenarioCounts.clear()
         retryCounts.clear()
         sessionMetrics.clear()
@@ -530,7 +528,15 @@ object ProxyMetrics {
 
     // ---- Per-second output samples for the rate bar chart ----
     /** Ring of (second-epoch → output tokens); capped, oldest evicted. */
-    private val rateBuckets = java.util.ArrayDeque<Pair<Long, Long>>()
+    /**
+     * Output tokens per wall-clock second, keyed by second so a bucket can be
+     * merged no matter what order writes arrive in. This was an
+     * insertion-ordered ArrayDeque that only merged at the tail: spreading a
+     * response over its span appends older seconds *after* newer ones, which
+     * created duplicate slots and made the 3600 cap a cap on entries rather
+     * than seconds (so real history was evicted by smeared duplicates).
+     */
+    private val rateBuckets = java.util.TreeMap<Long, Long>()
     const val RATE_CHART_SECS = 60
     /** Full retention behind the scrollable chart (1h, ~60KB). */
     const val RATE_HISTORY_SECS = 3600
@@ -539,6 +545,14 @@ object ProxyMetrics {
 
     /** Window used when a response's generation span is unknown. */
     const val MIN_SPAN_SECS = 4
+
+    /**
+     * Ceiling on how far one response's tokens may be smeared. Without it a
+     * long keep-alive tunnel (requestId start = tunnel start) spreads each
+     * response across the whole tunnel, appending thousands of buckets and
+     * evicting every other stream's real data.
+     */
+    const val MAX_SPREAD_SECS = 60
 
 
     /** Fold output tokens into the current second-bucket (test seam: [atMs]). */
@@ -569,14 +583,11 @@ object ProxyMetrics {
 
     private fun addToBucket(sec: Long, count: Long) {
         if (count <= 0) return
-        val last = rateBuckets.peekLast()
-        if (last != null && last.first == sec) {
-            rateBuckets.removeLast()
-            rateBuckets.addLast(sec to last.second + count)
-        } else {
-            rateBuckets.addLast(sec to count)
+        rateBuckets[sec] = (rateBuckets[sec] ?: 0L) + count
+        while (rateBuckets.size > RATE_HISTORY_SECS) {
+            val oldest = rateBuckets.firstKey() ?: break
+            rateBuckets.remove(oldest)
         }
-        while (rateBuckets.size > RATE_HISTORY_SECS) rateBuckets.removeFirst()
     }
 
     /**
@@ -590,14 +601,18 @@ object ProxyMetrics {
     @Synchronized
     fun sampleOutputSpread(requestId: String, count: Long, atMs: Long = System.currentTimeMillis()) {
         if (count <= 0) return
-        // Resume/replay guard. A client that resumes a session re-sends the
-        // conversation and the provider can repeat the same usage block, or
-        // report a running total instead of a per-chunk delta. Either way
-        // crediting `count` again would invent output that was never
-        // generated and spike tok/s. Only the increase is new output.
-        val previous = lastOutByRequest.put(requestId, count) ?: 0L
-        val fresh = count - previous
-        if (fresh <= 0L) return
+        // Cache-read/cache-write never reach here: recordUsage passes
+        // found[1] (output_tokens) alone.
+        //
+        // A monotonic per-requestId watermark was tried here to de-duplicate
+        // replayed usage blocks on session resume, but requestId is minted
+        // per client CONNECTION, so every response on a keep-alive tunnel was
+        // compared against the previous one and real output was silently
+        // dropped (tok/s read 0 while actively streaming, and lower-than-
+        // previous completions vanished entirely). Reporting the provider's
+        // number verbatim is the lesser evil; the multi-thousand tok/s spikes
+        // are handled by spreading unknown-span reports instead.
+        val fresh = count
         val startMs = requestStartTimes[requestId]
             ?: run { sampleOutputUnknownSpan(fresh, atMs); return }
         val spanSecs = ((atMs - startMs) / 1000).toInt()
@@ -617,7 +632,7 @@ object ProxyMetrics {
      * Pure spread plan (oldest-first per-second shares): even split, the
      * remainder spread one-per-bucket from the newest end.
      */
-    fun spreadPlan(count: Long, spanSecs: Int, capped: Int = RATE_HISTORY_SECS): List<Long> {
+    fun spreadPlan(count: Long, spanSecs: Int, capped: Int = MAX_SPREAD_SECS): List<Long> {
         if (count <= 0) return emptyList()
         val n = spanSecs.coerceIn(1, capped)
         val base = count / n
@@ -644,9 +659,7 @@ object ProxyMetrics {
     fun rateHistory(nSecs: Int = RATE_CHART_SECS, atMs: Long = System.currentTimeMillis()): List<Long> {
         val n = nSecs.coerceIn(1, RATE_HISTORY_SECS)
         val nowSec = atMs / 1000
-        val map = HashMap<Long, Long>(rateBuckets.size * 2)
-        for ((s, c) in rateBuckets) map[s] = (map[s] ?: 0L) + c
-        return List(n) { i -> map[nowSec - n + 1 + i] ?: 0L }
+        return List(n) { i -> rateBuckets[nowSec - n + 1 + i] ?: 0L }
     }
 
     fun hostSummary(top: Int = 5): List<Triple<String, Long, Long>> =
