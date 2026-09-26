@@ -169,18 +169,99 @@ class RateSpikeTest {
     }
 
     @Test
-    fun replayedUsageBlockDoesNotAddTokens() {
+    fun eachReportIsCreditedInFull() {
+        // Deliberate change of behaviour: a monotonic per-requestId watermark
+        // was removed because requestId is per-connection, so it dropped real
+        // output on keep-alive tunnels. Every report is credited verbatim.
         ProxyMetrics.resetTallies()
-        val id = "resume-1"
+        val id = "conn-3"
         ProxyMetrics.recordRequestStart("s", id, "https://api.openai.com/v1/chat/completions", "POST")
         val t = System.currentTimeMillis()
         ProxyMetrics.sampleOutputSpread(id, 500, t)
-        val afterFirst = ProxyMetrics.rateHistory(60, t).sum()
-        // Same block again (client resumed the session).
-        ProxyMetrics.sampleOutputSpread(id, 500, t)
-        assertEquals(afterFirst, ProxyMetrics.rateHistory(60, t).sum())
-        // A cumulative provider reporting 900 total credits only the new 400.
-        ProxyMetrics.sampleOutputSpread(id, 900, t)
-        assertEquals(afterFirst + 400, ProxyMetrics.rateHistory(60, t).sum())
+        ProxyMetrics.sampleOutputSpread(id, 200, t)
+        assertEquals(700L, ProxyMetrics.rateHistory(3600, t).sum())
+    }
+}
+
+/**
+ * Regressions found in review of the tok/s work.
+ *
+ * The resume-replay guard compared each response's output against the
+ * previous one *for the same requestId* — but requestId is minted per client
+ * CONNECTION, so on a keep-alive tunnel the second response looked like a
+ * replay and its tokens were dropped (tok/s read 0 while streaming).
+ */
+class KeepAliveTokenTest {
+    @Test
+    fun everyResponseOnOneConnectionIsCredited() {
+        ProxyMetrics.resetTallies()
+        val tunnel = "conn-1"
+        ProxyMetrics.recordRequestStart("s", tunnel, "https://api.anthropic.com/v1/messages", "POST")
+        val t = System.currentTimeMillis()
+        // Three unrelated completions multiplexed over one keep-alive tunnel,
+        // each reporting its own output_tokens; the second is LOWER than the
+        // first, which a monotonic watermark would have swallowed.
+        ProxyMetrics.recordUsage("h", "m", tunnel, longArrayOf(10, 500, 0, 0))
+        ProxyMetrics.recordUsage("h", "m", tunnel, longArrayOf(10, 200, 0, 0))
+        ProxyMetrics.recordUsage("h", "m", tunnel, longArrayOf(10, 800, 0, 0))
+        assertEquals("tally lost tokens", 1500L, ProxyMetrics.outputTokens)
+        // Full retention window: a spread can land a few seconds either side
+        // of `t`, so a 60s slice is not a safe place to assert the total.
+        assertEquals("rate lost tokens", 1500L, ProxyMetrics.rateHistory(3600, t).sum())
+    }
+
+    @Test
+    fun cacheTokensNeverReachTheRate() {
+        ProxyMetrics.resetTallies()
+        val id = "conn-2"
+        ProxyMetrics.recordRequestStart("s", id, "https://api.anthropic.com/v1/messages", "POST")
+        val t = System.currentTimeMillis()
+        ProxyMetrics.recordUsage("h", "m", id, longArrayOf(0, 40, 9000, 5000))
+        assertEquals(40L, ProxyMetrics.rateHistory(3600, t).sum())
+    }
+}
+
+/**
+ * The rate ring used to be an insertion-ordered deque that only merged at
+ * the tail, so spreading a response over its span (older seconds written
+ * after newer ones) created duplicate slots and evicted real history.
+ */
+class RateRingIntegrityTest {
+    @Test
+    fun outOfOrderSecondsMergeIntoOneBucket() {
+        ProxyMetrics.resetTallies()
+        val now = System.currentTimeMillis() / 1000
+        // Simulate the same second being written before and after a spread of
+        // older seconds: the totals must merge, not occupy two slots.
+        ProxyMetrics.sampleOutput(10, now * 1000)
+        ProxyMetrics.sampleOutputUnknownSpan(20, (now - 5) * 1000)
+        ProxyMetrics.sampleOutput(7, now * 1000)
+        val hist = ProxyMetrics.rateHistory(60, now * 1000)
+        assertEquals("same second split across slots", 17L, hist.last())
+        assertEquals(37L, hist.sum())
+    }
+
+    @Test
+    fun spreadIsCappedSoOneResponseCannotEvictRealHistory() {
+        ProxyMetrics.resetTallies()
+        val now = System.currentTimeMillis() / 1000
+        // A 3-hour "tunnel" span must not append thousands of buckets.
+        val plan = ProxyMetrics.spreadPlan(3000, 10_000)
+        assertTrue("plan too long: ${plan.size}", plan.size <= ProxyMetrics.MAX_SPREAD_SECS)
+        assertEquals(3000L, plan.sum())
+    }
+
+    @Test
+    fun retentionStillCoversAFullHourUnderSpreads() {
+        ProxyMetrics.resetTallies()
+        val now = System.currentTimeMillis() / 1000
+        // Fill an hour of seconds, then spread another response across the
+        // window; the earlier seconds must survive.
+        for (s in 0 until 3500) {
+            ProxyMetrics.sampleOutput(1, (now - s) * 1000)
+        }
+        ProxyMetrics.sampleOutputUnknownSpan(500, now * 1000)
+        val hist = ProxyMetrics.rateHistory(3600, now * 1000)
+        assertTrue("history lost: ${hist.count { it > 0 }} buckets", hist.count { it > 0 } > 3000)
     }
 }
