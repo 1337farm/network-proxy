@@ -10,9 +10,11 @@ import java.util.Collections
  */
 object LocalIps {
     /**
-     * Usable IPv4 literals, deduped and sorted numerically. Loopback and
-     * link-local (169.254.x) are dropped: neither is reachable from another
-     * device. Pure w.r.t. [interfaces] so it is unit-tested.
+     * Usable IPv4 literals, deduped and sorted numerically on all four
+     * octets (a string compare would order 10.0.0.10 before 10.0.0.9).
+     * Loopback and link-local (169.254.x) are dropped: neither is
+     * reachable from another device. Pure w.r.t. [interfaces] so it is
+     * unit-tested.
      */
     fun fromInterfaces(interfaces: List<String>): List<String> =
         interfaces.asSequence()
@@ -20,8 +22,20 @@ object LocalIps {
             .filter { validIpv4(it) }
             .filterNot { it.startsWith("127.") || it.startsWith("169.254.") }
             .distinct()
-            .sortedWith(compareBy({ it.split('.').first().toInt() }, { it }))
+            .sortedWith(OCTET_ORDER)
             .toList()
+
+    private fun octets(ip: String): List<Int> = ip.split('.').map { it.toInt() }
+
+    private val OCTET_ORDER = Comparator<String> { a, b ->
+        val x = octets(a)
+        val y = octets(b)
+        for (i in 0..3) {
+            val c = x[i].compareTo(y[i])
+            if (c != 0) return@Comparator c
+        }
+        0
+    }
 
     private fun validIpv4(s: String): Boolean {
         val m = IPV4.matchEntire(s) ?: return false

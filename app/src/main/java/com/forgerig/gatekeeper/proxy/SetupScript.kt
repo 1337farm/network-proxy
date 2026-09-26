@@ -56,8 +56,8 @@ object SetupScript {
             |# app with the Start button first, then paste this block.
             |# Safe to run repeatedly: every step below converges.
             |# Pasted in Termux, it also pushes the MITM CA into every
-            |# installed Ubuntu proot distro (env vars still need a separate
-            |# paste inside each distro - they do not cross proot).
+            |# installed Ubuntu proot distro. HTTPS decryption is always on,
+            |# so the CA must be trusted everywhere clients run.
             |export HTTP_PROXY="http://127.0.0.1:${port}" HTTPS_PROXY="http://127.0.0.1:${port}" NO_PROXY="localhost,127.0.0.1,::1,${BYPASS_HOSTS}"
             |export http_proxy="http://127.0.0.1:${port}" https_proxy="http://127.0.0.1:${port}" no_proxy="localhost,127.0.0.1,::1,${BYPASS_HOSTS}"
             |# Both cases: some runtimes (node/bun) only honor lowercase.
@@ -210,7 +210,7 @@ object SetupScript {
              |# steps below tolerate that and fall back to exported files.
              |python3 -c "import socket; s=socket.create_connection(('127.0.0.1',${port}), timeout=5); s.close(); print('proxy probe: listening on 127.0.0.1:${port}')" || \
              |  echo "proxy probe: 127.0.0.1:${port} refused - start the app proxy, then re-paste this script"
-             |# --- MITM CA trust (only matters when Decrypt-HTTPS is ON) ---
+             |# --- MITM CA trust (HTTPS decryption is always on) ---
              |# Fetches the CA straight from the running proxy - no manual
              |# Export step: \`curl http://127.0.0.1:${port}/ca.pem\` (works
              |# with or without proxy env, direct-to-port included). Falls
@@ -219,8 +219,8 @@ object SetupScript {
             |# Termux/Python/Node bundles, plus persistent exports (the bashrc
             |# managed block above the PS1 guard - the only place
             |# non-interactive shells like opencode serve will see).
-            |# Skips cleanly when absent (Decrypt OFF = opaque tunnels,
-            |# nothing breaks). After pasting: RESTART opencode serve so it
+             |# Skips cleanly when absent (clients then fail TLS against the
+             |# proxy - that is the only symptom). After pasting: RESTART opencode serve so it
             |# picks up the CA trust env (see note above).
              |CA_PEM=""
              |CA_TMP="${"$"}HOME/.config/network-proxy/ca.pem"
@@ -263,14 +263,18 @@ object SetupScript {
              |  # Ubuntu os-release always wins over the Termux guess.
              |  IS_TERMUX=0
              |  if [[ "$(uname -o 2>/dev/null)" == "Android" ]] && [[ -n "${"$"}{PREFIX:-}" ]] && [[ -d "${"$"}PREFIX" ]]; then IS_TERMUX=1; fi
-             |  IS_UBUNTU=0
-             |  if grep -qi '^ID=ubuntu' /etc/os-release 2>/dev/null; then IS_UBUNTU=1; IS_TERMUX=0; fi
+             |  if grep -qi '^ID=ubuntu' /etc/os-release 2>/dev/null; then IS_TERMUX=0; fi
              |  if [[ "${"$"}IS_TERMUX" == "1" ]]; then
              |    echo "Termux detected: CA trusted above for this shell; now pushing into Ubuntu proot distros"
              |    # Termux itself has no update-ca-certificates store tool by
              |    # default - the env bundle + exports above are its trust.
              |    # Fan out the CA FILE into every installed Ubuntu rootfs so
              |    # each distro trusts MITM splits without manual copying.
+             |    # Guarded on a non-empty CA: with CA_PEM="" this would copy
+             |    # an empty file over a distro's real trust config.
+             |    if [[ ! -s "${"$"}CA_PEM" ]]; then
+             |      echo "No CA file available - skipping proot fan-out (clients will fail TLS)"
+             |    else
              |    ROOTFS_DIRS=""
              |    if [[ -d "${"$"}PREFIX/var/lib/proot-distro/installed-rootfs" ]]; then
              |      ROOTFS_DIRS="${"$"}ROOTFS_DIRS ${"$"}PREFIX/var/lib/proot-distro/installed-rootfs/*/"
@@ -282,11 +286,11 @@ object SetupScript {
              |    FOUND=0
              |    for rootfs in ${"$"}ROOTFS_DIRS; do
              |      [[ -d "${"$"}rootfs/usr" ]] || continue
-             |      FOUND=1
              |      dist="$(basename "${"$"}rootfs")"
              |      certdir="${"$"}rootfs/usr/local/share/ca-certificates"
              |      mkdir -p "${"$"}certdir" 2>/dev/null
              |      if cp "${"$"}CA_PEM" "${"$"}certdir/network-proxy-ca.crt" 2>/dev/null; then
+             |        FOUND=1
              |        echo "CA installed into proot distro: ${"$"}dist"
              |      else
              |        echo "CA copy failed for ${"$"}dist (storage permission?) - copy ${"$"}CA_PEM there manually"
@@ -303,9 +307,11 @@ object SetupScript {
              |      fi
              |    done
              |    if [[ "${"$"}FOUND" == "0" ]]; then
-             |      echo "No Ubuntu rootfs found - paste the app setup script inside Ubuntu too (env vars do not cross the proot boundary)"
+             |      echo "No Ubuntu rootfs found. Install a proot distro and re-run this script to push the CA into it."
              |    else
-             |      echo "NOTE: proxy env vars do NOT cross into proot - paste the app setup script inside each Ubuntu distro as well"
+             |      echo "CA now trusted in Termux and in each distro above."
+             |      echo "proot-distro logins inherit these proxy env vars; if a tool ignores them, check it reads ${"$"}HTTPS_PROXY."
+             |    fi
              |    fi
              |  fi
              |  # NOTE: persistent CA exports are NOT appended here anymore -

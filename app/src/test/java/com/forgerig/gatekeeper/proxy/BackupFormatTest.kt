@@ -62,6 +62,33 @@ class BackupFormatTest {
     }
 
     @Test
+    fun corruptSaltReportsTheFriendlyMessage() {
+        // A damaged salt used to leak the raw JDK error
+        // ("Illegal base64 character ...") straight into the toast.
+        val parts = CredentialVault.encryptBackup(vault, "pw").split(":").toMutableList()
+        parts[1] = "!!!not-base64!!!"
+        try {
+            CredentialVault.decryptBackup(parts.joinToString(":"), "pw")
+            fail("expected rejection")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("wrong password"))
+        }
+    }
+
+    @Test
+    fun truncatedBlobReportsTheFriendlyMessage() {
+        val blob = CredentialVault.encryptBackup(vault, "pw")
+        try {
+            CredentialVault.decryptBackup(blob.substring(0, blob.length / 2), "pw")
+            fail("expected rejection")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(
+                e.message!!.contains("wrong password") || e.message!!.contains("not a network-proxy backup")
+            )
+        }
+    }
+
+    @Test
     fun backupNameFilterMatchesOnlyOurFiles() {
         assertTrue(CredentialVault.isBackupName("nanogatekeeper-backup-20260925-1052.txt"))
         assertTrue(!CredentialVault.isBackupName("notes.txt"))
@@ -72,6 +99,67 @@ class BackupFormatTest {
     fun exportFilenamesArePrefixed() {
         assertTrue(CredentialVault.backupFilename(0L).startsWith(CredentialVault.BACKUP_PREFIX))
         assertTrue(CredentialVault.backupFilename(0L).endsWith(".txt"))
+    }
+}
+
+/**
+ * Regression cover for the MITM conversation title: the tap holds a raw
+ * HTTP request (request line + headers + body), and feeding that to
+ * JSONObject made every title silently blank.
+ */
+class SessionTitleTest {
+    private fun bytes(s: String) = s.toByteArray(Charsets.UTF_8)
+
+    @Test
+    fun titleSurvivesHttpHeaders() {
+        val raw = bytes(
+            "POST /v1/chat/completions HTTP/1.1\r\n" +
+                "Host: openrouter.ai\r\n" +
+                "Authorization: Bearer sk-test\r\n" +
+                "Content-Type: application/json\r\n\r\n" +
+                """{"model":"m","messages":[{"role":"user","content":"Please refactor the router"}]}"""
+        )
+        assertEquals("Please refactor the router", SessionTracker.titleOf(raw))
+    }
+
+    @Test
+    fun titleFromBareBodyStillWorks() {
+        val raw = bytes("""{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"hello there"}]}""")
+        assertEquals("hello there", SessionTracker.titleOf(raw))
+    }
+
+    @Test
+    fun titleHandlesAnthropicContentBlocks() {
+        val raw = bytes(
+            "POST /v1/messages HTTP/1.1\r\nHost: opencode.ai\r\n\r\n" +
+                """{"messages":[{"role":"user","content":[{"type":"text","text":"fix the flaky test"}]}]}"""
+        )
+        assertEquals("fix the flaky test", SessionTracker.titleOf(raw))
+    }
+
+    @Test
+    fun truncatedBodyYieldsNoTitleInsteadOfThrowing() {
+        val raw = bytes(
+            "POST /v1/messages HTTP/1.1\r\nHost: x\r\n\r\n" +
+                """{"messages":[{"role":"user","content":"a very long prompt that got cut off mid-"""
+        )
+        assertEquals("", SessionTracker.titleOf(raw))
+    }
+
+    @Test
+    fun headerlessTunnelDataYieldsNoTitle() {
+        assertEquals("", SessionTracker.titleOf(bytes("not json at all")))
+        assertEquals("", SessionTracker.titleOf(null))
+    }
+
+    @Test
+    fun jsonBodyStripsHeadAndIsNoOpForBareBody() {
+        val bare = bytes("""{"a":1}""")
+        assertEquals("""{"a":1}""", String(SessionTracker.jsonBody(bare), Charsets.UTF_8))
+        val withHead = bytes("GET /x HTTP/1.1\r\nH: v\r\n\r\n{\"a\":1}")
+        assertEquals("""{"a":1}""", String(SessionTracker.jsonBody(withHead), Charsets.UTF_8))
+        // No header terminator and not a body -> nothing usable.
+        assertEquals(0, SessionTracker.jsonBody(bytes("GET /x HTTP/1.1\r\nH: v")).size)
     }
 }
 
@@ -87,6 +175,12 @@ class LocalIpsTest {
     @Test
     fun rejectsOutOfRangeOctets() {
         assertEquals(emptyList<String>(), LocalIps.fromInterfaces(listOf("999.1.1.1", "1.2.3.256")))
+    }
+
+    @Test
+    fun sortsOnAllFourOctets() {
+        val out = LocalIps.fromInterfaces(listOf("10.0.0.10", "10.0.0.9", "9.255.255.255", "10.0.1.2"))
+        assertEquals(listOf("9.255.255.255", "10.0.0.9", "10.0.0.10", "10.0.1.2"), out)
     }
 
     @Test

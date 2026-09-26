@@ -140,7 +140,9 @@ data class RequestMetrics(
     val bytesTransferred: Long,
     val statusCode: Int,
     val scenario: String,
-    val category: String = "unknown"
+    val category: String = "unknown",
+    /** Set when the record is finalized; drives retention pruning. */
+    val atMs: Long = 0L
 ) {
     fun toJson(): JSONObject {
         val json = JSONObject()
@@ -281,12 +283,12 @@ object ProxyMetrics {
     /**
      * Close out requests that never reached a terminal record (exceptions,
      * early returns after start). No-op when already ended, so every
-     * started request ends exactly once and scenarioCounts stops
-     * undercounting early failures.
+     * started request ends exactly once. The `remove` is the atomic
+     * claim: no monitor, so connection teardown never queues behind
+     * addBytes' lock on the hot relay path.
      */
-    @Synchronized
     fun recordRequestEndIfOpen(sessionId: String, requestId: String) {
-        if (!requestStartTimes.containsKey(requestId)) return
+        if (requestStartTimes.remove(requestId) == null) return // already ended
         recordRequestEnd(sessionId, requestId, 0, 0, NetworkScenario.UNKNOWN)
     }
 
@@ -301,14 +303,15 @@ object ProxyMetrics {
             bytesTransferred = bytesTransferred,
             statusCode = statusCode,
             scenario = scenario.name,
-            category = requestMetrics[requestId]?.category ?: categorizeUrl(requestMetrics[requestId]?.url ?: "")
+            category = requestMetrics[requestId]?.category ?: categorizeUrl(requestMetrics[requestId]?.url ?: ""),
+            atMs = System.currentTimeMillis()
         )
         requestMetrics[requestId] = metrics
         incrementScenario(scenario)
     }
 
     fun recordRetry(sessionId: String, requestId: String, attempt: Int, scenario: NetworkScenario, delayMs: Long) {
-        retryCounts[scenario.name] = retryCounts.getOrDefault(scenario.name, 0) + 1
+        retryCounts.merge(scenario.name, 1) { a, b -> a + b }
         sessionMetrics[sessionId]?.let {
             sessionMetrics[sessionId] = it.copy(
                 resumeCount = it.resumeCount + 1,
@@ -335,20 +338,25 @@ object ProxyMetrics {
             bytesTransferred = bytesTransferred,
             statusCode = if (prev?.statusCode == 0) 200 else prev?.statusCode ?: 200,
             scenario = scenario.name,
-            category = prev?.category ?: categorizeUrl(prev?.url ?: "")
+            category = prev?.category ?: categorizeUrl(prev?.url ?: ""),
+            atMs = System.currentTimeMillis()
         )
         incrementScenario(scenario)
     }
 
     fun incrementScenario(scenario: NetworkScenario) {
-        scenarioCounts[scenario.name] = scenarioCounts.getOrDefault(scenario.name, 0) + 1
+        // Atomic on a ConcurrentHashMap: get()+put() loses increments when
+        // the 32 relay threads retry at once, which is exactly what the
+        // scenario tallies are supposed to measure.
+        scenarioCounts.merge(scenario.name, 1) { a, b -> a + b }
     }
 
     fun incrementRetryType(retryType: RetryType) {
-        retryCounts[retryType.name] = retryCounts.getOrDefault(retryType.name, 0) + 1
+        retryCounts.merge(retryType.name, 1) { a, b -> a + b }
     }
 
     fun snapshot(): MetricsSnapshot {
+        pruneRequestMetrics()
         return MetricsSnapshot(
             sessions = sessionMetrics.values.toList(),
             requests = requestMetrics.values.toList(),
@@ -357,6 +365,24 @@ object ProxyMetrics {
             startTime = sessionStartTimes.values.minOrNull() ?: System.currentTimeMillis(),
             endTime = null
         )
+    }
+
+    /**
+     * requestMetrics is written once per HTTP request AND per CONNECT
+     * tunnel and was only ever emptied by clear() — a long-lived proxy
+     * grows it without bound while the 1 Hz UI poll copies the whole map
+     * on the main thread. Keep the most recent [MAX_RETAINED_REQUESTS],
+     * dropping to [PRUNE_TARGET] so this amortizes instead of re-sorting
+     * on every poll once we are over the cap.
+     */
+    private fun pruneRequestMetrics() {
+        if (requestMetrics.size <= MAX_RETAINED_REQUESTS) return
+        val keep = requestMetrics.entries
+            .sortedByDescending { it.value.atMs }
+            .take(PRUNE_TARGET)
+            .map { it.key }
+            .toSet()
+        requestMetrics.keys.retainAll(keep)
     }
 
     fun clear() {
@@ -371,6 +397,10 @@ object ProxyMetrics {
     // ---- Human-readable event log (logcat + in-app feed) ----
     const val TAG = "NetworkProxy"
     private const val MAX_EVENTS = 100
+
+    /** Retention cap for finalized request/tunnel records. */
+    private const val MAX_RETAINED_REQUESTS = 2000
+    private const val PRUNE_TARGET = 1500
     private val events = ConcurrentLinkedQueue<Pair<Long, String>>()
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
 
@@ -625,6 +655,23 @@ object ProxyMetrics {
                 val (h, m) = splitTallyKey(k)
                 TokenRow(h, m, t.inTokens, t.outTokens, t.cacheRead, t.cacheWrite)
             }
+
+    /**
+     * Keep at most [maxPerHost] rows for any one host, preserving the
+     * incoming (total-sorted) order. Pure (unit-tested).
+     */
+    fun capPerHost(rows: List<TokenRow>, maxPerHost: Int): List<TokenRow> {
+        if (maxPerHost <= 0) return emptyList()
+        val seen = java.util.HashMap<String, Int>()
+        val out = ArrayList<TokenRow>(rows.size)
+        for (r in rows) {
+            val n = seen.getOrDefault(r.host, 0)
+            if (n >= maxPerHost) continue
+            seen[r.host] = n + 1
+            out.add(r)
+        }
+        return out
+    }
 
     fun resetTallies() {
         hostTallies.clear()
