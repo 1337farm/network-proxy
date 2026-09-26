@@ -84,18 +84,6 @@ class ProxyViewModel : ViewModel() {
         }
     }
 
-    /**
-     * Ask the service to re-post its notification now, so a settings change
-     * (e.g. the status-bar tok/s toggle) shows up without waiting for a tick.
-     * A no-op when the proxy is not running.
-     */
-    fun refreshNotification() {
-        val ctx = context ?: return
-        if (isRunning.value != true) return
-        ctx.startService(Intent(ctx, ProxyService::class.java).apply {
-            action = ProxyService.ACTION_REFRESH_NOTIFICATION
-        })
-    }
 
     fun stopProxy() {
         val ctx = context ?: return
