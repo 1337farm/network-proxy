@@ -62,9 +62,12 @@ class ProxyService : Service() {
     private val binder = LocalBinder()
     private val running = AtomicInteger(0)
     @Volatile private var lastError: String? = null
-    private var port = 3128
-    private var metricsEnabled = true
-    private var mitmEnabled = true
+    // Written on the main thread (onStartCommand/onBind), read by all 32 pool
+    // threads and the health/notification executor. @Volatile only — no
+    // locking, so the hot relay read paths stay lock-free.
+    @Volatile private var port = 3128
+    @Volatile private var metricsEnabled = true
+    @Volatile private var mitmEnabled = true
     private var client: OkHttpClient? = null
     private var serverThread: Thread? = null
     private var pool = Executors.newFixedThreadPool(POOL_SIZE)
@@ -75,22 +78,27 @@ class ProxyService : Service() {
     @Volatile private var cachedIps: List<String>? = null
     @Volatile private var cachedIpsAt: Long = 0L
 
-    /** Wall-clock start of the current run, for the notification's uptime. */
+    /**
+     * The single authoritative uptime stamp for the current run: written once,
+     * at the top of [startProxy] (i.e. before the socket binds), and read by
+     * both the notification ([uptimeText]) and the in-app counter
+     * ([uptimeMs]). Stamping early means the shade shows a plausible uptime
+     * through the bind window instead of nothing; both readers additionally
+     * gate on `running`, so a stamp from a run that never bound (cleared below)
+     * is never rendered.
+     */
     @Volatile private var startedAtMs: Long = 0L
     /** Last posted notification signature; suppresses no-op re-posts. */
     @Volatile private var lastNotifSignature: String = ""
     private val healthFails = AtomicInteger(0)
     @Volatile private var lastHealthOkMs: Long = 0L
-    private var statsCallback: ((Int, Long, Int, Int) -> Unit)? = null
-    private var stateCallback: ((Boolean, String?) -> Unit)? = null
+    @Volatile private var stateCallback: ((Boolean, String?) -> Unit)? = null
 
     private var wifiLock: WifiManager.WifiLock? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
     private val requestCount = AtomicLong(0)
     private val bytesOut = AtomicLong(0)
-    /** Start of the current listener run (for uptime display). */
-    @Volatile private var startedMs: Long = 0L
     // Session registry (not a counter): add on entry, remove in finally.
     // Removal is idempotent, so the old double-decrement on CONNECT tunnels
     // (handleConnect + handleClient both touched inFlight) can't skew it,
@@ -107,9 +115,15 @@ class ProxyService : Service() {
     fun getStats(): Triple<Long, Long, Int> =
         Triple(requestCount.get(), bytesOut.get(), activeSessions.size)
 
-    /** Uptime of the current listener run (0 when stopped). */
+    /**
+     * Uptime of the current run, 0 when not actually serving. Reads the one
+     * authoritative stamp ([startedAtMs]), so this agrees with the value in
+     * the notification instead of lagging it by the bind time. The `running`
+     * test is what hides the pre-bind window: 0 renders as plain
+     * "Proxy running" until the socket is up.
+     */
     fun uptimeMs(): Long {
-        val s = startedMs
+        val s = startedAtMs
         return if (running.get() == 1 && s > 0) System.currentTimeMillis() - s else 0L
     }
 
@@ -122,13 +136,28 @@ class ProxyService : Service() {
         bytesOut.set(0)
     }
 
+    /**
+     * Install the state sink. The lambda captures the caller's ViewModel, so
+     * the service holds a strong reference to it for as long as the field is
+     * set — [clearStateCallback] (called from [onUnbind] and [onDestroy]) is
+     * what breaks that cycle.
+     */
     fun setStateCallback(callback: (Boolean, String?) -> Unit) {
         stateCallback = callback
     }
 
+    /**
+     * Drop the state sink so a later [stopProxy] can't post into a ViewModel
+     * nobody observes any more. Safe to call when nothing is installed; a
+     * reconnect re-installs via [setStateCallback].
+     */
+    fun clearStateCallback() {
+        stateCallback = null
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
-            stopProxy()
+            stopProxyAndRelease()
             stopSelf()
             return START_NOT_STICKY
         }
@@ -146,7 +175,7 @@ class ProxyService : Service() {
                 return START_STICKY
             }
             ProxyMetrics.event("Restart requested on :$port — draining old listener")
-            stopProxy()
+            stopProxyAndRelease()
         }
         lastError = null
         if (mitmEnabled) MitmCa.ensureLoaded(this)
@@ -168,6 +197,9 @@ class ProxyService : Service() {
     }
 
     private fun startProxy(port: Int) {
+        // Sole stamp of the run's uptime. Also invalidates the previous run's
+        // notification signature, so the new port/IP/uptime is re-posted
+        // instead of being suppressed as a no-op.
         startedAtMs = System.currentTimeMillis()
         lastNotifSignature = ""
         val builder = OkHttpClient.Builder()
@@ -190,6 +222,9 @@ class ProxyService : Service() {
                 serverSocket.setSoTimeout(1000)
             } catch (e: Exception) {
                 lastError = "Bind failed on 0.0.0.0:$port: ${e.message}"
+                // No listener: clear the run stamp so nothing can render an
+                // uptime for a run that never served.
+                startedAtMs = 0L
                 ProxyMetrics.eventError(lastError!!, e)
                 updateNotification(lastError!!, false)
                 stateCallback?.invoke(false, lastError)
@@ -199,7 +234,6 @@ class ProxyService : Service() {
                 return@Thread
             }
             running.set(1)
-            startedMs = System.currentTimeMillis()
             lastHealthOkMs = System.currentTimeMillis()
             updateNotification("Proxy running on 0.0.0.0:$port", true)
             stateCallback?.invoke(true, null)
@@ -565,7 +599,6 @@ class ProxyService : Service() {
                         requestCount.incrementAndGet()
                         bytesOut.addAndGet(transferred)
                         ProxyMetrics.addBytes(host, reqBytes, transferred)
-                        statsCallback?.invoke(1, transferred, 0, 0)
                         // Token tally from visible usage blocks (no-ops on tunnels).
                         tap?.let {
                             if (it.size() > 0) {
@@ -772,6 +805,12 @@ class ProxyService : Service() {
         } catch (_: Exception) { null } ?: return false
         var tlsClient: javax.net.ssl.SSLSocket? = null
         var tlsUp: javax.net.ssl.SSLSocket? = null
+        // Ownership of the raw upstream socket between Socket() and the TLS
+        // wrap. createSocket(raw, .., autoClose=true) only adopts `raw` when it
+        // RETURNS; if connect() or the wrap itself throws, the plain socket is
+        // orphaned — the catch below can only close tlsClient/tlsUp, and tlsUp
+        // is still null, so every declined/failed CONNECT leaked one fd.
+        val upstreamRaw = UpstreamRawGuard()
         try {
             clientOut.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
             clientOut.flush()
@@ -782,12 +821,16 @@ class ProxyService : Service() {
             tlsClient.startHandshake()
             val upCtx = MitmCa.upstreamContext()
             val raw = Socket()
+            upstreamRaw.track(raw)
             raw.connect(InetSocketAddress(host, port), 30_000)
             // Same read timeout opaqueTunnel uses: t2.join() is unbounded,
             // so a silently-idle upstream would otherwise pin a pool
             // thread (plus ~750KB of tap buffers) for the process lifetime.
             raw.soTimeout = 120_000
             tlsUp = upCtx.socketFactory.createSocket(raw, host, port, true) as javax.net.ssl.SSLSocket
+            // The wrap came back: tlsUp now owns `raw` and closes the
+            // underlying stream itself, so the guard must let go of it.
+            upstreamRaw.handOff()
             tlsUp.useClientMode = true
             tlsUp.sslParameters = tlsUp.sslParameters.apply {
                 endpointIdentificationAlgorithm = "HTTPS"
@@ -873,6 +916,63 @@ class ProxyService : Service() {
             try { tlsClient?.close() } catch (_: Exception) {}
             try { tlsUp?.close() } catch (_: Exception) {}
             return false
+        } finally {
+            // No-op on the success path (handed off). On any failure between
+            // Socket() and a returned TLS socket, this is the only thing that
+            // releases the fd.
+            upstreamRaw.closeIfUnowned()
+        }
+    }
+
+    /**
+     * Tracks the raw upstream socket from `Socket()` until the TLS wrapper
+     * takes ownership of it.
+     *
+     * `SSLSocketFactory.createSocket(raw, host, port, true)` adopts the plain
+     * socket *only on return*: if it throws (TLS alert, bad protocol, OOM
+     * during context init) the caller still holds a connected, un-owned fd
+     * that nothing else knows about, and the enclosing catch can only close
+     * the `tlsUp` variable — which is still null. One fd leaked per
+     * declined/failed MITM CONNECT; under load that exhausts the per-process
+     * fd table and takes the whole proxy down.
+     *
+     * So ownership is explicit: [track] on creation, [handOff] immediately
+     * after the wrap returns, and [closeIfUnowned] as the single cleanup
+     * point. Deliberately not a `Socket` subclass and not Android-dependent,
+     * so the state machine is JVM-unit-testable against real sockets.
+     */
+    internal class UpstreamRawGuard {
+        private var raw: Socket? = null
+
+        /** True once the TLS socket owns the raw socket and will close it. */
+        var handedOff: Boolean = false
+            private set
+
+        /** Adopt a freshly created, not-yet-wrapped socket. */
+        fun track(socket: Socket) {
+            raw = socket
+        }
+
+        /**
+         * Release ownership because the TLS wrapper took the socket. Any
+         * later [closeIfUnowned] is a no-op — closing here would sever a
+         * live, working connection.
+         */
+        fun handOff() {
+            raw = null
+            handedOff = true
+        }
+
+        /**
+         * Close the socket if the TLS wrap never took it. Returns true when
+         * there was an un-owned socket to release (false = nothing to do),
+         * which is what the test asserts on.
+         */
+        fun closeIfUnowned(): Boolean {
+            val socket = raw ?: return false
+            raw = null
+            try { socket.close() } catch (_: Exception) {}
+            return true
         }
     }
 
@@ -1060,15 +1160,24 @@ class ProxyService : Service() {
                 ProxyMetrics.eventWarning("Health: listener dead — self-restarting on :$port")
                 healthFails.set(0)
                 try {
-                    stopProxy(cancelHealth = false)
+                    stopProxyAndRelease(cancelHealth = false)
                 } catch (_: Exception) {}
                 startProxy(port)
             }
         }
     }
 
+    /**
+     * Stop serving, and hand back the retired OkHttp client for teardown
+     * outside the monitor.
+     *
+     * @return the client that must be passed to [releaseUpstream], or null.
+     * Callers should use [stopProxyAndRelease] rather than calling this
+     * directly: this method holds the service monitor, and the teardown is
+     * the only part of a stop that can block.
+     */
     @Synchronized
-    private fun stopProxy(cancelHealth: Boolean = true) {
+    private fun stopProxy(cancelHealth: Boolean = true): OkHttpClient? {
         running.set(0)
         if (cancelHealth) {
             try {
@@ -1077,14 +1186,53 @@ class ProxyService : Service() {
             healthExec = null
             healthFails.set(0)
         }
-        serverThread?.interrupt()
+        // Stop the accept loop, then drop the handle: the listener exits on
+        // its own (soTimeout 1s, plus the interrupt) and a later stop must
+        // not interrupt a thread object that is already dead. Deliberately no
+        // join() here — this runs on the main thread for the Stop button and
+        // for ACTION_STOP, and the listener's remaining work is one accept
+        // timeout plus a close().
+        val listener = serverThread
+        serverThread = null
+        try { listener?.interrupt() } catch (_: Exception) {}
         pool.shutdownNow()
-        try {
-            client?.dispatcher?.executorService?.shutdown()
-        } catch (_: Exception) {}
+        val retiring = client
+        // Nulled under the monitor so a concurrent startProxy can never hand
+        // this instance to a new run; the actual closing happens in
+        // releaseUpstream, off the monitor.
+        client = null
         releaseLocks()
         updateNotification("Proxy stopped", false)
         stateCallback?.invoke(false, null)
+        return retiring
+    }
+
+    /**
+     * [stopProxy] plus the OkHttp teardown. The split matters: evictAll()
+     * closes pooled connections and SSLSocket.close() writes a TLS
+     * close_notify alert, so both can block on a wedged upstream — and
+     * updateNotification (the 5s tick) shares this same monitor, so blocking
+     * while holding it would stall the notification and any concurrent
+     * stop/start.
+     */
+    private fun stopProxyAndRelease(cancelHealth: Boolean = true) {
+        releaseUpstream(stopProxy(cancelHealth))
+    }
+
+    /**
+     * Release everything a retired OkHttpClient owns. Shutting the dispatcher's
+     * executor down is not enough:
+     *  - idle pooled connections stay open and are handed to the next run
+     *    (a keep-alive from the previous session, on the old config);
+     *  - an in-flight call from the previous run keeps running, holding the
+     *    old client (and its dispatcher threads) alive past the restart.
+     * Order: cancel in-flight, evict the pool, then stop the executor.
+     */
+    private fun releaseUpstream(retiring: OkHttpClient?) {
+        if (retiring == null) return
+        try { retiring.dispatcher.cancelAll() } catch (_: Exception) {}
+        try { retiring.connectionPool.evictAll() } catch (_: Exception) {}
+        try { retiring.dispatcher.executorService.shutdown() } catch (_: Exception) {}
     }
 
     /**
@@ -1117,7 +1265,12 @@ class ProxyService : Service() {
         return fresh
     }
 
-    /** Elapsed proxy uptime as a compact "1h 04m" / "12m 30s" string. */
+    /**
+     * Elapsed proxy uptime as a compact "1h 04m" / "12m 30s" string.
+     * Same authoritative stamp as [uptimeMs], so the shade and the in-app
+     * counter can never disagree. Null (no uptime rendered) when the stamp is
+     * unset — i.e. a run that failed to bind.
+     */
     private fun uptimeText(): String? {
         val started = startedAtMs
         if (started <= 0) return null
@@ -1214,10 +1367,6 @@ class ProxyService : Service() {
         android.util.Log.i("NetworkProxy", "notification[$title]: ${body.collapsed}")
         if (changed) manager.notify(1, notification)
         if (isRunning) startForeground(1, notification) else stopForeground(true)
-    }
-
-    fun setStatsCallback(callback: (Int, Long, Int, Int) -> Unit) {
-        statsCallback = callback
     }
 
     // ---- Local CA endpoint (curl-able) ----
@@ -1424,8 +1573,21 @@ class ProxyService : Service() {
 
     override fun onBind(intent: Intent?): IBinder = binder
 
+    override fun onUnbind(intent: Intent?): Boolean {
+        // The client is gone (ViewModel cleared / Activity destroyed). This is
+        // a started service, so it keeps proxying — but the ViewModel that
+        // owns stateCallback is unreachable, and the field is a strong ref to
+        // it plus its LiveData. Release it here; a rebind re-installs.
+        // Returning super keeps the default (false => onBind again on rebind).
+        clearStateCallback()
+        return super.onUnbind(intent)
+    }
+
     override fun onDestroy() {
-        stopProxy()
+        stopProxyAndRelease()
+        // After, not before: stopProxy's final `false` state is what flips the
+        // UI to "stopped" while observers still exist.
+        clearStateCallback()
         super.onDestroy()
     }
 }

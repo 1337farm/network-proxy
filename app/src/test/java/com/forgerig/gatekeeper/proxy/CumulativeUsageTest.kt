@@ -6,16 +6,28 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Cumulative usage reporting (Anthropic-style SSE re-reports
- * `output_tokens` as a running total in every `message_delta` frame).
- * Crediting each frame verbatim summed 12+40+150 = 202 for a 150-token
- * completion — a ~35% over-report that grew with frame count and read as
- * multi-thousand tok/s. These tests pin the delta behaviour of
- * [ProxyMetrics.StreamingUsage] through the real accounting path
- * ([ProxyMetrics.recordUsage]), so the tally and the rate are checked as the
- * relay actually produces them, and pin the two failure modes that must never
- * come back: a keep-alive tunnel dropping real tokens, and a short
- * completion reading as one huge one-second spike.
+ * Usage accounting for cumulative AND one-shot providers.
+ *
+ * Two different reporting styles meet in one stream, and treating them the
+ * same is wrong in opposite directions:
+ *
+ *  - Anthropic-style SSE re-reports `output_tokens` as a RUNNING TOTAL in
+ *    every `message_delta` frame. Crediting each frame verbatim summed
+ *    12+40+150 = 202 for a 150-token completion — a ~35% over-report that
+ *    grew with frame count and read as multi-thousand tok/s.
+ *  - `input_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens`
+ *    are ONE-SHOT per response. Diffing them as if they were running totals
+ *    under-counted on keep-alive connections, where one scanner sees many
+ *    responses and a growing conversation's input (100, then 350) was
+ *    credited as 100 + 250.
+ *
+ * These tests drive [ProxyMetrics.StreamingUsage] directly with real UTF-8
+ * bytes through the real accounting path ([ProxyMetrics.recordUsage]), so
+ * the tally and the rate are checked as the relay actually produces them,
+ * and they pin the failure modes that must never come back: a keep-alive
+ * tunnel dropping real tokens, an over-reported running total, a short
+ * completion reading as one huge one-second spike, and the [beginResponse]
+ * boundary hook disagreeing with the automatic fallback.
  */
 class CumulativeUsageTest {
 
@@ -58,6 +70,38 @@ class CumulativeUsageTest {
 
     private fun rateSum(id: String): Long =
         ProxyMetrics.rateHistory(ProxyMetrics.RATE_HISTORY_SECS, System.currentTimeMillis()).sum()
+
+    /** One feed of [text] to a scanner; returns just the credit quad. */
+    private fun feedOne(u: ProxyMetrics.StreamingUsage, text: String): LongArray {
+        val b = text.toByteArray(Charsets.UTF_8)
+        return u.feed(b, b.size)
+    }
+
+    /** The provider's authoritative usage schema, verbatim. */
+    private val schemaJson = """
+        {
+          "type": "object",
+          "properties": {
+            "input_tokens":  { "type": "integer", "description": "The number of tokens in the input prompt." },
+            "output_tokens": { "type": "integer", "description": "The number of tokens generated in the assistant response." },
+            "cache_creation_input_tokens": { "type": ["integer","null"], "description": "Tokens written to the cache for prompt caching setup (if applicable)." },
+            "cache_read_input_tokens":     { "type": ["integer","null"], "description": "Tokens retrieved directly from the prompt cache (if applicable)." }
+          },
+          "required": ["input_tokens", "output_tokens"]
+        }
+    """.trimIndent()
+
+    /**
+     * A realistic single usage object carrying the schema's four fields.
+     * The schema itself is the contract; the scanner never sees a "type"
+     * wrapper, so the pinned payload is the `properties` payload.
+     */
+    private fun schemaUsageBody(
+        input: Int = 1200, output: Int = 150,
+        cacheRead: Int = 9000, cacheWrite: Int = 500
+    ): String = """{"type":"message_delta","usage":{"input_tokens":$input,""" +
+        """"output_tokens":$output,"cache_creation_input_tokens":$cacheWrite,""" +
+        """"cache_read_input_tokens":$cacheRead}}"""
 
     private fun newTunnel(id: String) {
         ProxyMetrics.recordRequestStart("s", id, "https://$host/v1/messages", "POST")
@@ -284,6 +328,260 @@ class CumulativeUsageTest {
             for (k in 0..3) total[k] += u.flush()[k]
             assertArrayEquals("split=$split", longArrayOf(1200, 150, 0, 0), total)
         }
+    }
+
+    // ---- per-key semantics: the one-shot keys are NOT running totals ----
+    //
+    // `input_tokens` counts only the UNCACHED part of the prompt, so across a
+    // growing conversation it grows (100, then 350). Diffing it as if it were
+    // Anthropic's running output total credits 100 + 250 = 350 and silently
+    // drops 250 real input tokens. These tests drive the scanner directly with
+    // real UTF-8 bytes and pin the fix.
+
+    /**
+     * Run [chunks] on ONE scanner, crediting through [recordUsage] like the
+     * relay does. [boundaryBefore] lists the chunk indexes that begin a new
+     * response, i.e. where the relay owner would call
+     * [ProxyMetrics.StreamingUsage.beginResponse]. Returns the scanner total.
+     */
+    private fun driveScanner(
+        id: String,
+        chunks: List<String>,
+        boundaryBefore: Set<Int> = emptySet()
+    ): LongArray {
+        val u = ProxyMetrics.StreamingUsage()
+        val total = LongArray(4)
+        fun credit(q: LongArray) {
+            for (k in 0..3) total[k] += q[k]
+            if (q[0] + q[1] + q[2] + q[3] > 0) {
+                ProxyMetrics.recordUsage(host, model, id, q)
+            }
+        }
+        chunks.forEachIndexed { i, c ->
+            if (i in boundaryBefore) credit(u.beginResponse())
+            credit(feedOne(u, c))
+        }
+        credit(u.flush())
+        return total
+    }
+
+    @Test
+    fun theProviderSchemaMapsToTheQuadWithCacheWriteOnTheRightSlot() {
+        // Pinned against the provider's own schema: cache_creation is the
+        // cache WRITE and cache_read is the cache READ. Swapping them would
+        // still sum to the same grand total everywhere the UI shows one
+        // number, so only a slot-level assertion catches it.
+        ProxyMetrics.resetTallies()
+        val u = ProxyMetrics.StreamingUsage()
+        val q = feedOne(u, schemaUsageBody())
+        assertArrayEquals(
+            "(input, output, cacheRead, cacheWrite)",
+            longArrayOf(1200, 150, 9000, 500), q
+        )
+        // The schema text itself must not be mistaken for a usage report.
+        val u2 = ProxyMetrics.StreamingUsage()
+        assertArrayEquals(
+            "the schema document is not a usage block",
+            LongArray(4), feedOne(u2, schemaJson)
+        )
+    }
+
+    @Test
+    fun schemaFieldNamesAreAllScannedAndTheRequiredPairIsNeverOptional() {
+        // Only input_tokens/output_tokens are required; the two cache fields
+        // are ["integer","null"], so a body carrying just the required pair
+        // must credit exactly that and leave the cache slots at zero.
+        ProxyMetrics.resetTallies()
+        val u = ProxyMetrics.StreamingUsage()
+        val q = feedOne(u, """{"usage":{"input_tokens":1200,"output_tokens":150}}""")
+        assertArrayEquals(longArrayOf(1200, 150, 0, 0), q)
+        // And a body carrying only the cache pair (a null-valued usage block
+        // reporting no prompt) must credit the cache slots, not the input.
+        val u2 = ProxyMetrics.StreamingUsage()
+        val q2 = feedOne(u2, """{"usage":{"cache_read_input_tokens":9000,"cache_creation_input_tokens":500}}""")
+        assertArrayEquals(longArrayOf(0, 0, 9000, 500), q2)
+    }
+
+    @Test
+    fun aGrowingOneShotInputOnOneKeepAliveScannerIsSummedNotDiffed() {
+        // THE REGRESSION. One scanner, one keep-alive connection, two
+        // responses, `input_tokens` growing 100 -> 350. One-shot semantics
+        // require 100 + 350 = 450; the old diff-everything rule gave
+        // 100 + (350 - 100) = 350 and lost 250 input tokens.
+        ProxyMetrics.resetTallies()
+        val id = "keepalive-oneshot"
+        newTunnel(id)
+        val total = driveScanner(
+            id,
+            listOf(
+                startFrame(100),
+                deltaFrame(12),
+                deltaFrame(150),
+                // Response 2 on the SAME connection: bigger prompt.
+                startFrame(350),
+                deltaFrame(12),
+                deltaFrame(40)
+            )
+        )
+        assertEquals("100 + 350, not 100 + 250", 450L, total[0])
+        assertEquals(450L, ProxyMetrics.inputTokens)
+        assertEquals("150 + 40 = 190 output", 190L, total[1])
+        // Input never reaches the rate sampler; only output does.
+        assertEquals(190L, rateSum(id))
+    }
+
+    @Test
+    fun theExplicitBeginResponseHookAgreesWithTheAutomaticFallback() {
+        // Same stream, same expected totals, but the boundary is DECLARED at
+        // index 3 instead of inferred. Proves the hook and the fallback are
+        // two routes to one behaviour, so calling the hook can never change
+        // the numbers.
+        ProxyMetrics.resetTallies()
+        val id = "keepalive-hooked"
+        newTunnel(id)
+        val total = driveScanner(
+            id,
+            listOf(
+                startFrame(100),
+                deltaFrame(12),
+                deltaFrame(150),
+                startFrame(350),
+                deltaFrame(12),
+                deltaFrame(40)
+            ),
+            boundaryBefore = setOf(3)
+        )
+        assertEquals(450L, total[0])
+        assertEquals(190L, total[1])
+        assertEquals(450L, ProxyMetrics.inputTokens)
+        assertEquals(190L, rateSum(id))
+    }
+
+    @Test
+    fun aRepeatedOneShotValueIsOneResponseButTheSameValueInALaterResponseCountsAgain() {
+        // The one case the automatic fallback alone cannot decide: two
+        // responses reporting the SAME input_tokens. The fallback reads the
+        // repeat as the same response (correct — it is genuinely
+        // indistinguishable in-band) and the explicit hook is what counts it
+        // twice. Both halves are pinned here.
+        ProxyMetrics.resetTallies()
+        val id = "same-value"
+        newTunnel(id)
+        val u = ProxyMetrics.StreamingUsage()
+        // Re-sent usage object inside ONE response: credited once.
+        val a = feedOne(u, startFrame(100))
+        ProxyMetrics.recordUsage(host, model, id, a)
+        val b = feedOne(u, startFrame(100))
+        ProxyMetrics.recordUsage(host, model, id, b)
+        val c = feedOne(u, startFrame(100))
+        ProxyMetrics.recordUsage(host, model, id, c)
+        assertEquals(100L, a[0])
+        assertEquals("identical re-send is not a new response", 0L, b[0])
+        assertEquals(0L, c[0])
+        assertEquals(100L, ProxyMetrics.inputTokens)
+        // Next response, declared: same value, counted again.
+        assertArrayEquals("boundary flushes nothing pending", LongArray(4), u.beginResponse())
+        val d = feedOne(u, startFrame(100))
+        ProxyMetrics.recordUsage(host, model, id, d)
+        assertEquals("same value, later response", 100L, d[0])
+        assertEquals(200L, ProxyMetrics.inputTokens)
+    }
+
+    @Test
+    fun oneShotCacheFieldsAreSummedAcrossKeepAliveResponsesAndReachTheTallyOnly() {
+        // Cache read/write are one-shot per response exactly like input, so a
+        // second response with a LARGER cache_read must be credited in full
+        // rather than diffed — and neither may ever reach the rate.
+        ProxyMetrics.resetTallies()
+        val id = "keepalive-cache"
+        newTunnel(id)
+        val total = driveScanner(
+            id,
+            listOf(
+                startFrame(100, cacheRead = 9000, cacheWrite = 500),
+                deltaFrame(150),
+                startFrame(350, cacheRead = 40000, cacheWrite = 1200),
+                deltaFrame(40)
+            )
+        )
+        assertEquals("9000 + 40000, not 9000 + 31000", 49000L, total[2])
+        assertEquals("500 + 1200, not 500 + 700", 1700L, total[3])
+        assertEquals(450L, total[0])
+        assertEquals(190L, total[1])
+        assertEquals(49000L, ProxyMetrics.cacheReadTokens)
+        assertEquals(1700L, ProxyMetrics.cacheWriteTokens)
+        // Rate sees output alone: 190, never 190 + 49000 + 1700.
+        assertEquals(190L, rateSum(id))
+    }
+
+    @Test
+    fun beginResponseMidStreamNeitherLosesNorDuplicatesOutput() {
+        // The output running total is 40 when the boundary lands. Crediting
+        // 150 after a reset must still be exactly one 150, neither lost nor
+        // double-credited against the 40 already counted.
+        ProxyMetrics.resetTallies()
+        val id = "midstream"
+        newTunnel(id)
+        val u = ProxyMetrics.StreamingUsage()
+        val total = LongArray(4)
+        fun credit(q: LongArray) {
+            for (k in 0..3) total[k] += q[k]
+            if (q[0] + q[1] + q[2] + q[3] > 0) {
+                ProxyMetrics.recordUsage(host, model, id, q)
+            }
+        }
+        credit(feedOne(u, deltaFrame(12)))
+        credit(feedOne(u, deltaFrame(40)))
+        assertEquals("40 before the boundary", 40L, total[1])
+        credit(u.beginResponse())
+        assertEquals("the boundary itself credits nothing", 40L, total[1])
+        // The running total restarted, so 150 is a NEW response's total and
+        // is credited in full — the reset watermark is what encodes that.
+        credit(feedOne(u, deltaFrame(150)))
+        assertEquals("new response credited in full", 190L, total[1])
+        credit(feedOne(u, deltaFrame(150)))
+        assertEquals("repeat inside the new response credits 0", 190L, total[1])
+        credit(u.flush())
+        assertEquals(190L, total[1])
+        assertEquals(190L, ProxyMetrics.outputTokens)
+        assertEquals(190L, rateSum(id))
+    }
+
+    @Test
+    fun beginResponseCreditsAPendingTrailingDigitRunExactlyOnceBeforeResetting() {
+        // A response cut mid-number still has to be counted. beginResponse
+        // flushes the deferred match against the OLD trackers (so it is the
+        // increase, 150 - 40 = 110) and then resets — the partial number is
+        // never both flushed here and completed by the next feed.
+        ProxyMetrics.resetTallies()
+        val id = "pending-boundary"
+        newTunnel(id)
+        val u = ProxyMetrics.StreamingUsage()
+        ProxyMetrics.recordUsage(host, model, id, feedOne(u, deltaFrame(40)))
+        val cut = "event: message_delta\ndata: {\"usage\":{\"output_tokens\":150"
+        val cb = cut.toByteArray(Charsets.UTF_8)
+        assertEquals("deferred at the edge", 0L, u.feed(cb, cb.size)[1])
+        val boundary = u.beginResponse()
+        assertEquals("flushes the pending run as a delta", 110L, boundary[1])
+        ProxyMetrics.recordUsage(host, model, id, boundary)
+        assertArrayEquals("pending tail consumed exactly once", LongArray(4), u.beginResponse())
+        // The next response is counted from scratch and the stale 150 is not
+        // re-credited by whatever bytes completed the old number.
+        val next = feedOne(u, deltaFrame(12))
+        ProxyMetrics.recordUsage(host, model, id, next)
+        assertEquals(12L, next[1])
+        assertEquals("40 + 110 + 12", 162L, ProxyMetrics.outputTokens)
+    }
+
+    @Test
+    fun beginResponseBeforeTheFirstResponseIsANoOp() {
+        // The relay calls it on every response head, including the first.
+        ProxyMetrics.resetTallies()
+        val u = ProxyMetrics.StreamingUsage()
+        assertArrayEquals(LongArray(4), u.beginResponse())
+        assertArrayEquals(LongArray(4), u.beginResponse())
+        val q = feedOne(u, startFrame(1200) + deltaFrame(150))
+        assertArrayEquals(longArrayOf(1200, 150, 0, 0), q)
     }
 
     // ---- short-span smoothing: a 1-3s completion must not read as one bucket ----
