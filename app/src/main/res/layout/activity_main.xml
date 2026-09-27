@@ -133,46 +133,25 @@
                         android:layout_height="wrap_content"
                         android:text="Retries: 0"/>
 
-                    <TableLayout
-                        android:id="@+id/tokensTable"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:stretchColumns="1,2,3,4"
-                        android:shrinkColumns="0">
-                    </TableLayout>
-
+                    <!-- Compact summary block: requests, bytes, sessions,
+                         retries, and the per-host byte split. None of
+                         these belong to either statistics group. -->
                     <TextView
-                        android:id="@+id/tokensFooterText"
+                        android:id="@+id/hostsText"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:textSize="12sp"
                         android:fontFamily="monospace"
-                        android:textColor="@color/title_violet"
                         android:text=""/>
 
+                    <!-- Group 1 of 2: output rate. The heading carries the
+                         rate, so no other widget may restate it. -->
                     <TextView
+                        android:id="@+id/rateTitleText"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="10dp"
-                        android:text="Cache efficiency"
-                        android:textSize="13sp"
-                        android:textStyle="bold"
-                        style="@style/Text.SectionTitle"/>
-
-                    <LinearLayout
-                        android:id="@+id/cacheChart"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:orientation="vertical">
-                    </LinearLayout>
-
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="10dp"
-                        android:text="Output rate (tok/s, trailing 60s)"
+                        android:layout_marginTop="12dp"
+                        android:text="Output rate · 0 tok/s · avg 0.0 · peak 0"
                         android:textSize="13sp"
                         android:textStyle="bold"
                         style="@style/Text.SectionTitle"/>
@@ -183,11 +162,33 @@
                         android:layout_height="96dp"
                         android:layout_marginTop="4dp"/>
 
+                    <!-- Group 2 of 2: tokens (in / out / cache read /
+                         cache write, plus the derived reuse % column).
+                         Hostnames are full and untruncated — they are
+                         spanned headings, so they wrap instead. -->
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:text="Tokens"
+                        android:textSize="13sp"
+                        android:textStyle="bold"
+                        style="@style/Text.SectionTitle"/>
+
+                    <TableLayout
+                        android:id="@+id/tokensTable"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:stretchColumns="1,2,3,4,5"
+                        android:shrinkColumns="0">
+                    </TableLayout>
+
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="10dp"
-                        android:text="Sessions by key"
+                        android:text="Sessions"
                         android:textSize="13sp"
                         android:textStyle="bold"
                         style="@style/Text.SectionTitle"/>
@@ -200,13 +201,6 @@
                         android:orientation="vertical">
                     </LinearLayout>
 
-                    <TextView
-                        android:id="@+id/hostsText"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:textSize="12sp"
-                        android:fontFamily="monospace"
-                        android:text=""/>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 

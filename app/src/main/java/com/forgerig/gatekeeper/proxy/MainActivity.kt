@@ -540,7 +540,6 @@ class MainActivity : AppCompatActivity() {
             if (snap.scenarioCounts.isEmpty()) "Retries: $retries"
             else "Retries: $retries (${snap.scenarioCounts.entries.joinToString { "${it.key}=${it.value}" }})"
         renderTokensTable()
-        renderCacheChart()
         // Scrollable rate window: the view holds its pan offset; each
         // poll re-queries the window ending there (0 = live edge).
         // While a pan gesture is active the view owns its frame — pushing
@@ -571,6 +570,7 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         }
+        renderRateHeading()
         renderSessionsList(svc)
         val hosts = ProxyMetrics.hostSummary(3)
         findViewById<TextView>(R.id.hostsText)?.text =
@@ -585,139 +585,161 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Real table widget: header + per-host rows + TOTAL + footer line. */
+    /**
+     * Group 1 of 2 — the rate heading. The chart below it is this group's
+     * body, and the rate / average / peak numbers are stated HERE and
+     * nowhere else: the token table used to repeat the rate in a footer,
+     * and that footer is gone (see [renderTokensTable]).
+     */
+    private fun renderRateHeading() {
+        val samples = ProxyMetrics.rateHistory(
+            TokenRateView.WINDOW_SECS,
+            TokenRateView.windowEndMs(System.currentTimeMillis(), 0)
+        )
+        findViewById<TextView>(R.id.rateTitleText)?.text = StatsConsolidation.rateHeading(
+            ProxyMetrics.outputTokensPerSecond(),
+            ProxyMetrics.outputTokensAvg(),
+            samples.maxOrNull() ?: 0L,
+            TokenRateView.WINDOW_SECS
+        )
+    }
+
+    /**
+     * Group 2 of 2 — tokens: input, output, cache read, cache write, plus
+     * a derived `reuse %`. Exactly one place shows each number:
+     *
+     *  - `cacheR` is the only place cache reuse is counted. The old
+     *    "Cache efficiency" section (percentage + bar, with its own TOTAL)
+     *    restated the same tokens a second time and has been deleted; the
+     *    ratio now lives in the `reuse %` column next to its inputs.
+     *  - the TOTAL row is dropped when a single data row would repeat it
+     *    verbatim — [StatsConsolidation.shouldShowTotal].
+     *  - the host is a spanned heading above its models, full length and
+     *    wrapping: as a table column it was ellipsized to `opencode.ai…`
+     *    and disagreed with the (now deleted) cache section, which showed
+     *    it in full. Each model row keeps its own numbers, so the row
+     *    reads on its own.
+     *  - the trailing rate is NOT restated here (Group 1 owns it).
+     */
     private fun renderTokensTable() {
         val table = findViewById<android.widget.TableLayout>(R.id.tokensTable) ?: return
-        val footer = findViewById<TextView>(R.id.tokensFooterText)
-        val rows = ProxyMetrics.tokenSummary(5)
-        val tps = String.format(java.util.Locale.US, "%.1f", ProxyMetrics.outputTokensPerSecond())
-        // Session average alongside the trailing window: trailing reads 0
-        // whenever the stream has been idle >30s (correct but alarming);
-        // avg climbs iff output tokens are actually being counted.
-        val avg = String.format(java.util.Locale.US, "%.1f", ProxyMetrics.outputTokensAvg())
         table.removeAllViews()
-        if (rows.isEmpty()) {
-            table.visibility = View.GONE
-            footer?.text = "Tokens: in 0 / out 0 @ $tps tok/s (avg $avg)"
-            return
-        }
-        table.visibility = View.VISIBLE
         val violet = getColor(R.color.title_violet)
         val hint = getColor(R.color.hint_text)
-        table.addView(tableRow(listOf("host", "in", "out", "cacheR", "cacheW"), header = true, violet = violet))
-        table.addView(dividerRow())
-        for (r in rows) {
+        // Capped per host: one provider serving six models must not fill
+        // the table and hide every other host (the rule the deleted cache
+        // section enforced). The TOTAL row, when shown, still carries the
+        // global tallies.
+        val rows = ProxyMetrics.capPerHost(ProxyMetrics.tokenSummary(8), 3)
+        table.visibility = View.VISIBLE
+        if (rows.isEmpty()) {
+            // Spanned so it can't be ellipsized: the pre-consolidation
+            // empty state ("in 0 / out 0") must survive somewhere.
+            table.addView(
+                hostHeadingRow("no traffic yet · in 0 · out 0 · cacheR 0 · cacheW 0", hint)
+            )
+            return
+        }
+        table.addView(
+            tableRow(
+                listOf("host / model", "in", "out", "cacheR", "cacheW", "reuse %"),
+                header = true, violet = violet
+            )
+        )
+        table.addView(dividerRow(TOKEN_COLUMNS))
+        for (group in StatsConsolidation.groupByHost(rows)) {
+            table.addView(hostHeadingRow(group.host, violet))
+            for (r in group.rows) {
+                table.addView(
+                    tableRow(
+                        listOf(
+                            modelCell(r.model, hint),
+                            StatsFormat.humanTokens(r.inTokens),
+                            StatsFormat.humanTokens(r.outTokens),
+                            StatsFormat.humanTokens(r.cacheRead),
+                            StatsFormat.humanTokens(r.cacheWrite),
+                            StatsConsolidation.reusePct(r.inTokens, r.cacheRead)
+                        )
+                    )
+                )
+            }
+        }
+        if (StatsConsolidation.shouldShowTotal(rows.size)) {
+            table.addView(dividerRow(TOKEN_COLUMNS))
             table.addView(
                 tableRow(
                     listOf(
-                        hostModelCell(r.host, r.model, hint),
-                        StatsFormat.humanTokens(r.inTokens),
-                        StatsFormat.humanTokens(r.outTokens),
-                        StatsFormat.humanTokens(r.cacheRead),
-                        StatsFormat.humanTokens(r.cacheWrite)
-                    )
+                        "TOTAL",
+                        StatsFormat.humanTokens(ProxyMetrics.inputTokens),
+                        StatsFormat.humanTokens(ProxyMetrics.outputTokens),
+                        StatsFormat.humanTokens(ProxyMetrics.cacheReadTokens),
+                        StatsFormat.humanTokens(ProxyMetrics.cacheWriteTokens),
+                        StatsConsolidation.reusePct(
+                            ProxyMetrics.inputTokens, ProxyMetrics.cacheReadTokens
+                        )
+                    ),
+                    bold = true
                 )
             )
         }
-        table.addView(dividerRow())
-        table.addView(
-            tableRow(
-                listOf(
-                    "TOTAL", StatsFormat.humanTokens(ProxyMetrics.inputTokens),
-                    StatsFormat.humanTokens(ProxyMetrics.outputTokens),
-                    StatsFormat.humanTokens(ProxyMetrics.cacheReadTokens),
-                    StatsFormat.humanTokens(ProxyMetrics.cacheWriteTokens)
-                ),
-                bold = true
-            )
-        )
-        footer?.text = "@ $tps tok/s (avg $avg)"
     }
 
-    /** Cache-efficiency bars per host (models aggregated) plus TOTAL. */
-    private fun renderCacheChart() {
-        val chart = findViewById<android.widget.LinearLayout>(R.id.cacheChart) ?: return
-        chart.removeAllViews()
-        // Rows are per (host, model) so the model is visible, but cap the
-        // rows per host: otherwise one provider serving six models would
-        // fill every slot and hide every other host.
-        val rows = ProxyMetrics.capPerHost(ProxyMetrics.tokenSummary(16), 2)
-        if (rows.isEmpty()) {
-            chart.visibility = View.GONE
-            return
-        }
-        chart.visibility = View.VISIBLE
+    /**
+     * Spanned host heading: one cell across the whole table so the full
+     * hostname wraps instead of being ellipsized. Never truncated.
+     */
+    private fun hostHeadingRow(host: String, violet: Int): android.widget.TableRow {
+        val row = android.widget.TableRow(this)
         val d = resources.displayMetrics.density
-        val emerald = getColor(R.color.status_running)
-        val track = getColor(R.color.outline)
-        val violet = getColor(R.color.title_violet)
-        val hint = getColor(R.color.hint_text)
-        // One row per (host, model) like the table — the exact model is
-        // always visible; hostnames wrap full-length, never truncated.
-        for (r in rows) {
-            chart.addView(chartRow(r.host, r.model, r.cacheRead, r.inTokens, d, emerald, track, violet, hint, bold = false))
-        }
-        chart.addView(
-            chartRow(
-                "TOTAL", "", ProxyMetrics.cacheReadTokens, ProxyMetrics.inputTokens,
-                d, emerald, track, violet, hint, bold = true
-            )
+        val lp = android.widget.TableRow.LayoutParams(
+            android.widget.TableRow.LayoutParams.MATCH_PARENT,
+            android.widget.TableRow.LayoutParams.WRAP_CONTENT
         )
-    }
-
-    private fun chartRow(
-        host: String, model: String, cacheRead: Long, input: Long, d: Float,
-        emerald: Int, track: Int, violet: Int, hint: Int, bold: Boolean
-    ): android.widget.LinearLayout {
-        val col = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            setPadding(0, (4 * d).toInt(), 0, (4 * d).toInt())
-        }
-        // Full hostname, wraps freely — never truncated. Exact model on
-        // a dimmed second line (blank for unattributed tunnels).
-        val hostLabel = TextView(this).apply {
+        lp.span = TOKEN_COLUMNS
+        val tv = TextView(this).apply {
             text = host
             textSize = 12f
             typeface = android.graphics.Typeface.MONOSPACE
-            if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
             setTextColor(violet)
+            gravity = android.view.Gravity.START
+            setPadding(0, (6 * d).toInt(), 0, (2 * d).toInt())
         }
-        col.addView(hostLabel)
-        val modelLabel = TextView(this).apply {
-            text = if (model.isNotBlank()) "$model  ${StatsFormat.cachePct(cacheRead, input)} cached"
-            else "${StatsFormat.cachePct(cacheRead, input)} cached"
-            textSize = 12f
-            typeface = android.graphics.Typeface.MONOSPACE
-            setTextColor(hint)
-            maxLines = 2
-            ellipsize = android.text.TextUtils.TruncateAt.END
-        }
-        col.addView(modelLabel)
-        val bar = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.HORIZONTAL
-            weightSum = 1f
-        }
-        val ratio = StatsFormat.cacheRatio(cacheRead, input).toFloat()
-        val fill = View(this).apply {
-            setBackgroundColor(emerald)
-            layoutParams = android.widget.LinearLayout.LayoutParams(0, (10 * d).toInt(), ratio)
-        }
-        val rest = View(this).apply {
-            setBackgroundColor(track)
-            layoutParams = android.widget.LinearLayout.LayoutParams(0, (10 * d).toInt(), (1f - ratio).coerceAtLeast(0f))
-        }
-        // weights of exactly 0 drop the view; keep a hairline so the
-        // track reads even at 0% / 100%.
-        if (ratio <= 0f) fill.layoutParams = android.widget.LinearLayout.LayoutParams((2 * d).toInt(), (10 * d).toInt())
-        if (ratio >= 1f) rest.layoutParams = android.widget.LinearLayout.LayoutParams(0, (10 * d).toInt(), 0f)
-        bar.addView(fill)
-        bar.addView(rest)
-        col.addView(bar)
-        return col
+        row.addView(tv, lp)
+        return row
     }
 
-    /** Key-backed sessions: title, key label @ provider/model, age,
-     *  plus the latest routing event (429/roll/spill). */
+    /** Model cell of a grouped row (the host is the heading above it). */
+    private fun modelCell(model: String, hint: Int): CharSequence {
+        val text = if (model.isNotBlank()) model else "— (unattributed)"
+        return if (model.isNotBlank()) text else dimmed(text, hint)
+    }
+
+    /** Dimmed copy of [text] (empty-state cells, unattributed models). */
+    private fun dimmed(text: String, color: Int): CharSequence =
+        android.text.SpannableString(text).apply {
+            setSpan(
+                android.text.style.ForegroundColorSpan(color),
+                0, text.length,
+                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+
+    /**
+     * Sessions: one row per live session, name first —
+     *
+     *   Oc proxy            <- client name (header / body metadata), else
+     *                           the harvested id, else `(client key) @ host`
+     *   Fix my json please  <- description: first user turn, capped
+     *   msg_01ABC · 12.3K tok · 43s · (client key) @ zen
+     *
+     * The name comes from [SessionTracker.displayName], whose precedence
+     * is client name → harvested remote id → `(client key) @ host`, so a
+     * client that sends no name degrades to the id it DOES share with the
+     * CLI agent's logs instead of the identical "(client key)" every row
+     * used to show. The id is on the dim third line — available for
+     * correlating with an agent run, never dominant.
+     */
     private fun renderSessionsList(svc: ProxyService?) {
         val list = findViewById<android.widget.LinearLayout>(R.id.sessionsList) ?: return
         list.removeAllViews()
@@ -729,27 +751,52 @@ class MainActivity : AppCompatActivity() {
         }
         list.visibility = View.VISIBLE
         val now = System.currentTimeMillis()
+        val hint = getColor(R.color.hint_text)
         for (s in sessions) {
-            val title = TextView(this).apply {
-                text = s.title.ifBlank { "${s.providerId.ifBlank { s.host }}${s.model.ifBlank { "" }.let { if (it.isNotEmpty()) "/$it" else "" }}" }
-                textSize = 12f
+            val name = TextView(this).apply {
+                text = s.displayName
+                textSize = 13f
                 typeface = android.graphics.Typeface.MONOSPACE
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
                 maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
             }
-            list.addView(title)
-            val modelBit = if (s.model.isNotBlank()) "/${s.model}" else ""
-            val detail = StringBuilder()
-                .append("${s.keyLabel} @ ${s.providerId}$modelBit · ${StatsFormat.humanAge(s.startedMs, now)}")
+            list.addView(name)
+            val desc = TextView(this).apply {
+                text = s.description
+                textSize = 12f
+                typeface = android.graphics.Typeface.MONOSPACE
+                setTextColor(hint)
+                maxLines = 2
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            list.addView(desc)
+            val meta = StringBuilder()
+            // The id is echoed on this dim line ONLY when it is not already
+            // the headline (unnamed sessions show the id as their name).
+            if (s.clientName.isNotBlank() && s.remoteId.isNotBlank()) {
+                meta.append(s.remoteId).append(" · ")
+            }
+            meta.append(StatsFormat.humanTokens(s.totalTokens())).append(" tok")
+            meta.append(" · ").append(StatsFormat.humanAge(s.startedMs, now))
+            // The model is only spelled out when the description above is
+            // not already the model (describe() falls back to it).
+            if (s.model.isNotBlank() && s.description != s.model) {
+                meta.append(" · ").append(s.model)
+            }
+            val attribution = StringBuilder(s.keyLabel.ifBlank { "(client key)" })
+            if (s.providerId.isNotBlank() && s.providerId != s.model) {
+                attribution.append(" @ ").append(s.providerId)
+            }
+            meta.append(" · ").append(attribution)
             if (s.lastEvent.isNotBlank()) {
-                detail.append("\n↳ ${s.lastEvent} · ${StatsFormat.humanAge(s.lastEventMs, now)} ago")
+                meta.append("\n\u21b3 ${s.lastEvent} · ${StatsFormat.humanAge(s.lastEventMs, now)} ago")
             }
             val sub = TextView(this).apply {
-                text = detail.toString()
+                text = meta.toString()
                 textSize = 11f
                 typeface = android.graphics.Typeface.MONOSPACE
-                setTextColor(getColor(R.color.hint_text))
+                setTextColor(hint)
             }
             list.addView(sub)
         }
@@ -758,13 +805,14 @@ class MainActivity : AppCompatActivity() {
             val more = TextView(this).apply {
                 text = "+${total - sessions.size} more"
                 textSize = 12f
-                setTextColor(getColor(R.color.hint_text))
+                setTextColor(hint)
             }
             list.addView(more)
         }
     }
+
     /** Hairline rule between table sections (header / TOTAL). */
-    private fun dividerRow(): android.widget.TableRow {
+    private fun dividerRow(span: Int = TOKEN_COLUMNS): android.widget.TableRow {
         val row = android.widget.TableRow(this)
         val d = resources.displayMetrics.density
         val v = View(this)
@@ -772,7 +820,7 @@ class MainActivity : AppCompatActivity() {
             android.widget.TableRow.LayoutParams.MATCH_PARENT,
             (1 * d).coerceAtLeast(1f).toInt()
         )
-        lp.span = 5
+        lp.span = span
         v.layoutParams = lp
         v.setBackgroundColor(getColor(R.color.outline))
         val wrap = android.widget.TableRow.LayoutParams(
@@ -783,23 +831,6 @@ class MainActivity : AppCompatActivity() {
         row.setPadding(0, (3 * d).toInt(), 0, (3 * d).toInt())
         row.addView(v)
         return row
-    }
-
-    /**
-     * Host cell with the ACTUAL upstream model on a dimmed second line
-     * (post any spillover rewrite — never the harness-requested id).
-     * Blank model renders host only (unattributed tunnels).
-     */
-    private fun hostModelCell(host: String, model: String, hint: Int): CharSequence {
-        if (model.isBlank()) return host
-        val text = "$host\n$model"
-        return android.text.SpannableString(text).apply {
-            setSpan(
-                android.text.style.ForegroundColorSpan(hint),
-                host.length + 1, text.length,
-                android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-            )
-        }
     }
 
     private fun tableRow(cells: List<CharSequence>, header: Boolean = false, bold: Boolean = false, violet: Int = 0): android.widget.TableRow {
@@ -884,4 +915,90 @@ class MainActivity : AppCompatActivity() {
             upstreamText.visibility = View.GONE
         }
     }
+}
+/** Columns of the consolidated Tokens group (Group 2 of 2). */
+private const val TOKEN_COLUMNS = 6
+
+/**
+ * Pure, JVM-testable half of the statistics consolidation. The rendering
+ * (TableLayout rows, chart, session list) is Android-only and cannot be
+ * unit-tested here, so the rules that decide *what* is rendered live here:
+ *
+ *  - [shouldShowTotal] — the TOTAL-vs-single-row dedupe rule;
+ *  - [reuseRatio] / [reusePct] — the derived `reuse %` column, replacing
+ *    the deleted "Cache efficiency" percentage-and-bar section;
+ *  - [groupByHost] — per-(host, model) rows collected under one full,
+ *    untruncated host heading;
+ *  - [rateHeading] — Group 1's heading, the single place the rate is
+ *    stated (the table no longer repeats it in a footer).
+ */
+object StatsConsolidation {
+    /**
+     * A TOTAL row is only worth its own line when there is more than one
+     * data row: with a single row it would repeat that row's numbers
+     * verbatim, which is exactly the duplication this consolidation
+     * removes. Zero rows render as an explicit empty state instead.
+     */
+    fun shouldShowTotal(rowCount: Int): Boolean = rowCount > 1
+
+    /**
+     * Cache reuse as a share of the input a request actually paid for:
+     *
+     *     reuse % = cacheRead / (input + cacheRead)
+     *
+     * The denominator is the total prompt the provider was asked to
+     * attend to — the freshly billed [input] tokens plus the ones served
+     * from cache — so 100% means "nothing was re-billed". Not the old
+     * `cacheRead / input` ratio, which is clamped at 1.0 and therefore
+     * could not express a fully cached turn. No prompt at all → 0.
+     */
+    fun reuseRatio(input: Long, cacheRead: Long): Double {
+        val inTokens = input.coerceAtLeast(0)
+        val cached = cacheRead.coerceAtLeast(0)
+        val total = inTokens + cached
+        if (total <= 0L) return 0.0
+        return (cached.toDouble() / total.toDouble()).coerceIn(0.0, 1.0)
+    }
+
+    /** "48.5%" label for [reuseRatio]. */
+    fun reusePct(input: Long, cacheRead: Long): String =
+        String.format(java.util.Locale.US, "%.1f%%", 100.0 * reuseRatio(input, cacheRead))
+
+    /** One host and the (host, model) rows beneath it, in input order. */
+    data class HostGroup(val host: String, val rows: List<ProxyMetrics.TokenRow>)
+
+    /**
+     * Group per-(host, model) rows under a single host entry, keeping
+     * first-seen host order and per-host row order. The host is rendered
+     * as a spanned heading rather than repeated on every row, so a host
+     * with four models states its name once — in full.
+     */
+    fun groupByHost(rows: List<ProxyMetrics.TokenRow>): List<HostGroup> {
+        val out = ArrayList<HostGroup>()
+        val index = HashMap<String, Int>()
+        for (r in rows) {
+            val at = index[r.host]
+            if (at != null) {
+                out[at] = out[at].copy(rows = out[at].rows + r)
+            } else {
+                index[r.host] = out.size
+                out.add(HostGroup(r.host, listOf(r)))
+            }
+        }
+        return out
+    }
+
+    /**
+     * Group 1's heading: the ONLY place the output rate is stated. `avg`
+     * is the session average (it climbs whenever output tokens are really
+     * counted, which the trailing window alone does not show once the
+     * stream goes idle); `peak` is the largest trailing second in the
+     * same window the chart plots.
+     */
+    fun rateHeading(tokPerSec: Double, avg: Double, peak: Long, windowSecs: Int): String =
+        String.format(
+            java.util.Locale.US,
+            "Output rate · %.0f tok/s · avg %.1f · peak %d (trailing %ds)",
+            tokPerSec, avg, peak, windowSecs
+        )
 }

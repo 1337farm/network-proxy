@@ -444,13 +444,16 @@ class ProxyService : Service() {
             }
             // Attribute this session for the Sessions-by-key UI: actual
             // upstream key label + model, plus a conversation title from
-            // the first user turn (blank for non-chat bodies).
+            // the first user turn (blank for non-chat bodies) and the
+            // client's own session name (`x-session-name`, or body
+            // metadata) so the list shows "Oc proxy" and not just the key.
             if (provider != null) {
                 val (pid, klabel) = keyCtx?.let { it.first.id to it.second.label }
                     ?: (provider.id to "—")
                 SessionTracker.note(
                     sessionId, pid, klabel, modelOf(body), host,
-                    title = SessionTracker.titleOf(body)
+                    title = SessionTracker.titleOf(body),
+                    name = SessionTracker.nameOf(headers, body)
                 )
             }
             var finalCode = -1
@@ -864,15 +867,17 @@ class ProxyService : Service() {
             t1.start(); t2.start()
             t1.join(); t2.join()
             // Backfill the sniffed upstream model + conversation title
-            // into the session note (both blank at CONNECT time).
+            // into the session note (both blank at CONNECT time), plus
+            // the client's session name off the tapped request head/body.
             val sniffed = upModel.get()
             val reqTitle = SessionTracker.titleOf(reqTap.toByteArray())
-            if (sniffed.isNotBlank() || reqTitle.isNotBlank()) {
+            val reqName = SessionTracker.nameFromRequestHead(reqTap.toByteArray())
+            if (sniffed.isNotBlank() || reqTitle.isNotBlank() || reqName.isNotBlank()) {
                 val st = ProviderBroker.store(this)
                 val mp = ProviderStore.matchHost(st, host)
                 SessionTracker.note(
                     sessionId, mp?.id ?: "", "(client key)", sniffed, host.lowercase(),
-                    title = reqTitle
+                    title = reqTitle, name = reqName
                 )
             }
             // NOTE: bytesOut is fed per-chunk inside relay()/relayTap();
