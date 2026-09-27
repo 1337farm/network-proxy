@@ -218,7 +218,11 @@ class TokenRateView @JvmOverloads constructor(
             val out = LongArray(n)
             for (s in series) {
                 val p = s.perSecond
-                for (i in p.indices) out[i] += p[i]
+                // Trailing-aligned: these are time windows ending "now", so a
+                // short (just-started) series belongs at the newest bucket, not
+                // shifted to the front where it would read as ancient traffic.
+                val off = n - p.size
+                for (i in p.indices) out[off + i] += p[i]
             }
             return out
         }
@@ -449,9 +453,14 @@ class TokenRateView @JvmOverloads constructor(
                 val a = prev.perSecond
                 val b = s.perSecond
                 if (b.size > a.size) {
+                    // Accumulate, not replace: this branch must agree with the
+                    // else-branch below, otherwise the same key merged across
+                    // frames silently loses whichever window was longer.
+                    // Both windows are trailing-aligned (newest second last).
                     val grown = LongArray(b.size)
-                    System.arraycopy(a, 0, grown, b.size - a.size, a.size)
                     System.arraycopy(b, 0, grown, 0, b.size)
+                    val off = b.size - a.size
+                    for (i in a.indices) grown[off + i] += a[i]
                     acc[s.key] = Series(prev.key, prev.provider, prev.model, grown)
                 } else {
                     val off = a.size - b.size

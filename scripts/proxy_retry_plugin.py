@@ -19,6 +19,7 @@ Load with:
   (run from this scripts/ dir, or add it to PYTHONPATH)
 """
 import json
+import logging
 import os
 import random
 import socket
@@ -29,6 +30,7 @@ from typing import Optional
 from proxy.http.parser import HttpParser
 from proxy.http.proxy import HttpProxyBasePlugin
 
+logger = logging.getLogger(__name__)
 RETRYABLE = {408, 425, 426, 429, 431, 451, 500, 502, 503, 504}
 HDR_END = b"\r\n\r\n"
 
@@ -109,13 +111,12 @@ class RetryAbsorbPlugin(HttpProxyBasePlugin):
         self._method = method
         if method == "CONNECT" or bool(getattr(request, "is_https_tunnel", False)):
             self._passthrough = True
+            logger.debug(f"CONNECT tunnel passthrough for {self._host}:{self._port}")
             return request
         try:
             self._req_bytes = bytes(request.build())
         except Exception:
             self._req_bytes = b""
-        # NB: parser.host strips the port -- the authoritative authority
-        # (host:port) lives in the Host header.
         host_s = ""
         try:
             raw_host = request.header(b"host")
@@ -139,6 +140,7 @@ class RetryAbsorbPlugin(HttpProxyBasePlugin):
         else:
             self._host = host_s
             self._port = 80
+        logger.debug(f"Request: {method} {host_s} -> {self._host}:{self._port}")
         return request
 
     # -- response path ------------------------------------------------
@@ -146,20 +148,31 @@ class RetryAbsorbPlugin(HttpProxyBasePlugin):
         if self._passthrough or self._decided:
             return chunk
         if self._draining:
-            return None  # swallow leftover bytes of an absorbed error response
+            return None
         self._buf += bytes(chunk)
         try:
             code, headers, _ = _parse_head(bytes(self._buf))
         except ValueError:
-            return None  # headers not complete yet: keep buffering
-        if code in RETRYABLE and self._attempt < self._max_attempts and self._req_bytes:
+            return None
+        if code == 0:
+            logger.warning(f"Received malformed/empty response from upstream")
+            self._log(scenario="PASSTHROUGH", status=code, delay_ms=0, final=True)
+            return self._forward_buffered()
+        retryable = code in RETRYABLE
+        logger.debug(f"Upstream response: {code} (retryable={retryable}, attempt={self._attempt}/{self._max_attempts})")
+        if retryable and self._attempt < self._max_attempts and self._req_bytes:
+            if not self._host:
+                logger.error(f"Missing host for retry (attempt {self._attempt + 1})")
+                self._log(scenario="PASSTHROUGH", status=code, delay_ms=0, final=True)
+                return self._forward_buffered()
             self._absorb_and_redial(headers, code)
             return None
         self._log(scenario="SUCCESS" if 200 <= code < 300 else (
-            "RETRYABLE_HTTP" if code in RETRYABLE else "PASSTHROUGH"),
+            "RETRYABLE_HTTP" if retryable else "PASSTHROUGH"),
             status=code, delay_ms=0, final=True)
         return self._forward_buffered()
 
+# -- retry/redial ------------------------------------------------
     def _backoff(self, headers: dict) -> float:
         retry_after = _retry_after(headers)
         if retry_after is not None:
@@ -176,11 +189,14 @@ class RetryAbsorbPlugin(HttpProxyBasePlugin):
         """
         delay = self._backoff(headers)
         self._attempt += 1
+        logger.info(f"Retry #{self._attempt} after {delay:.2f}s for {code} on {self._host}:{self._port}")
         self._log(scenario="RETRYABLE_HTTP", status=code,
                   delay_ms=int(delay * 1000), final=False)
         time.sleep(delay)
         sock = None
         try:
+            if not self._host:
+                raise RuntimeError("Cannot redial: no host resolved for request")
             sock = socket.create_connection((self._host, self._port), timeout=30)
             sock.settimeout(120)
             sock.sendall(self._req_bytes)
@@ -195,7 +211,6 @@ class RetryAbsorbPlugin(HttpProxyBasePlugin):
             except ValueError:
                 code2 = 0
             if code2 in RETRYABLE and self._attempt < self._max_attempts:
-                # Absorb this one too and try again (bounded by max attempts).
                 try:
                     sock.close()
                 except Exception:
@@ -207,7 +222,6 @@ class RetryAbsorbPlugin(HttpProxyBasePlugin):
                     headers2 = {}
                 self._absorb_and_redial(headers2, code2)
                 return
-            # Forward the redialed response, then relay the rest inline.
             self.client.queue(memoryview(bytes(raw)))
             transferred = len(raw)
             try:
@@ -221,10 +235,12 @@ class RetryAbsorbPlugin(HttpProxyBasePlugin):
                 pass
             self._log(scenario="SUCCESS" if 200 <= code2 < 300 else "RETRYABLE_HTTP",
                       status=code2, delay_ms=0, final=True, bytes_out=transferred)
-            self._draining = True  # swallow original upstream's leftovers
+            logger.info(f"Redial succeeded: {code2} ({transferred} bytes)")
+            self._draining = True
         except Exception as e:
+            logger.error(f"Redial failed (attempt {self._attempt}): {e}")
             self._log(scenario="REDIAL_FAILED", status=0,
-                      delay_ms=0, final=False, error="%r" % e)
+                      delay_ms=0, final=False, error=str(e))
             self._forward_buffered()
         finally:
             try:
@@ -263,5 +279,6 @@ class RetryAbsorbPlugin(HttpProxyBasePlugin):
             }
             with open(path, "a") as f:
                 f.write(json.dumps(rec) + "\n")
-        except Exception:
-            pass
+            logger.debug(f"Metrics: {scenario} status={status} attempt={self._attempt}")
+        except Exception as e:
+            logger.error(f"Failed to write metrics: {e}")

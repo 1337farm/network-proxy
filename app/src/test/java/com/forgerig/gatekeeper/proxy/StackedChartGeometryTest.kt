@@ -51,8 +51,7 @@ class StackedChartGeometryTest {
         val c = s("p3:llama", 100, 0, 5)
         assertArrayEquals(
             longArrayOf(111, 22, 38),
-            TokenRateView.stackTotals(listOf(a, b, c)),
-            0L
+            TokenRateView.stackTotals(listOf(a, b, c))
         )
     }
 
@@ -72,8 +71,9 @@ class StackedChartGeometryTest {
         // neither shift the window nor throw.
         val long = s("p1:gpt", 1, 1, 1, 1)
         val short = s("p2:claude", 5)
-        assertArrayEquals(longArrayOf(1, 1, 1, 6), TokenRateView.stackTotals(listOf(long, short)), 0L)
-        assertArrayEquals(longArrayOf(5, 0, 0, 1), TokenRateView.stackTotals(listOf(short, long)), 0L)
+        assertArrayEquals(longArrayOf(1, 1, 1, 6), TokenRateView.stackTotals(listOf(long, short)))
+        // Order-independent: a stack is not a sequence.
+        assertArrayEquals(longArrayOf(1, 1, 1, 6), TokenRateView.stackTotals(listOf(short, long)))
     }
 
     @Test
@@ -205,8 +205,8 @@ class StackedChartGeometryTest {
                 assertTrue("label $y below the baseline $b", y <= b)
                 // A collision is only acceptable when the plot has no
                 // collision-free row left at all.
-                val anyFree = (Math.ceil(floor).toInt()..b.toInt()).any {
-                    !TokenRateView.labelCollision(it.toFloat(), b, sp)
+                val anyFree = (Math.ceil(floor.toDouble()).toInt()..b.toInt()).any {
+                    !TokenRateView.labelCollision(it.toFloat(), b.toFloat(), sp.toFloat())
                 }
                 if (anyFree) {
                     assertFalse(
@@ -377,11 +377,11 @@ class StackedChartGeometryTest {
             n = 4
         )
         assertEquals(2, bands.size)
-        assertArrayEquals(longArrayOf(1, 2, 3, 4), bands[0], 0L)
+        assertArrayEquals(longArrayOf(1, 2, 3, 4), bands[0])
         // a short history is the most recent N seconds, left-padded with
         // zeros — never right-shifted, which would put a new model's
         // first tokens at the wrong second
-        assertArrayEquals(longArrayOf(0, 0, 0, 9), bands[1], 0L)
+        assertArrayEquals(longArrayOf(0, 0, 0, 9), bands[1])
     }
 
     @Test
@@ -390,7 +390,7 @@ class StackedChartGeometryTest {
             listOf(Series("k", "p", "m", longArrayOf(1, 2, 3, 4, 5, 6))),
             n = 4
         )
-        assertArrayEquals(longArrayOf(3, 4, 5, 6), bands[0], 0L)
+        assertArrayEquals(longArrayOf(3, 4, 5, 6), bands[0])
         assertEquals(0, TokenRateView.bandWindows(emptyList(), n = 0).size)
     }
 
@@ -403,7 +403,7 @@ class StackedChartGeometryTest {
             )
         )
         assertEquals(1, merged.size)
-        assertArrayEquals(longArrayOf(11, 22), merged[0].perSecond, 0L)
+        assertArrayEquals(longArrayOf(11, 22), merged[0].perSecond)
     }
 
     @Test
@@ -416,7 +416,7 @@ class StackedChartGeometryTest {
         )
         assertEquals(1, merged.size)
         // the short one is the most recent second: 3 + 5 at the tail
-        assertArrayEquals(longArrayOf(1, 2, 8), merged[0].perSecond, 0L)
+        assertArrayEquals(longArrayOf(1, 2, 8), merged[0].perSecond)
     }
 
     @Test
@@ -425,10 +425,10 @@ class StackedChartGeometryTest {
         val merged = TokenRateView.mergeSeries(many, max = 4)
         assertEquals(4, merged.size)
         // the loudest four are kept, in total order
-        assertEquals(listOf("p12", "p11", "p10", "p9"), merged.map { it.key })
+        assertEquals(listOf("p12:m", "p11:m", "p10:m", "p9:m"), merged.map { it.key })
         // and the dropped tail is folded into the last band, not lost: the
         // per-second totals are identical to the un-capped input
-        assertArrayEquals(TokenRateView.stackTotals(many), TokenRateView.stackTotals(merged), 0L)
+        assertArrayEquals(TokenRateView.stackTotals(many), TokenRateView.stackTotals(merged))
         // bucket 0: 12+11+10+9 = 42 kept plus 1..8 = 36 folded in
         assertEquals(78L, TokenRateView.stackTotals(merged)[0])
     }
@@ -449,7 +449,8 @@ class StackedChartGeometryTest {
         }
         val merged = TokenRateView.mergeSeries(silent)
         assertEquals(TokenRateView.MAX_STACKS, merged.size)
-        assertArrayEquals(longArrayOf(0L, 0L), TokenRateView.stackTotals(merged), 0L)
+        // the silent windows are two buckets wide, so the frame is too
+        assertArrayEquals(longArrayOf(0L, 0L), TokenRateView.stackTotals(merged))
         assertEquals(1L, TokenRateView.peakOfTotals(TokenRateView.stackTotals(merged)))
         // nothing is named, so the legend is empty and the chart draws the
         // empty grid
@@ -468,7 +469,7 @@ class StackedChartGeometryTest {
         val bands = TokenRateView.bandWindows(merged, 3)
         assertEquals(2, bands.size)
         val totals = TokenRateView.stackTotals(merged)
-        assertArrayEquals(longArrayOf(40, 20, 15), totals, 0L)
+        assertArrayEquals(longArrayOf(40, 20, 15), totals)
         assertEquals(40L, TokenRateView.peakOfTotals(totals))
         // every band is the frame width, so the draw loop can index [i]
         for (band in bands) assertEquals(3, band.size)
