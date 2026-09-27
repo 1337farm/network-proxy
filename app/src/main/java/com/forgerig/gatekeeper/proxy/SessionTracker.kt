@@ -18,7 +18,9 @@ package com.forgerig.gatekeeper.proxy
  * PRIVACY: the harvested id is provider metadata (an opaque handle), not
  * prompt content — it may be logged and exported with metrics. No new
  * prompt text is captured here; the only body text this file keeps is
- * the pre-existing 40-char conversation title.
+ * the pre-existing 40-char conversation title, plus a ≤[MAX_NAME_CHARS]
+ * client-supplied session name, which is a label the client chose to
+ * publish, not conversation content (see [nameOf]).
  *
  * RAM-only, cleared per session end. Thread-safe. Bounded: at most
  * [MAX_SESSIONS] live sessions (LRU-evicted), the title is capped at
@@ -44,6 +46,13 @@ object SessionTracker {
      */
     const val MAX_TITLE_CHARS = 40
 
+    /**
+     * Client-supplied name cap, in the same spirit as [MAX_TITLE_CHARS]:
+     * a session NAME is a couple of words, so anything longer is a title
+     * or (worse) prompt content that a client stuffed into a header.
+     */
+    const val MAX_NAME_CHARS = 48
+
     /** Ids are opaque handles; anything longer is content, not an id. */
     const val MAX_ID_CHARS = 64
 
@@ -56,6 +65,15 @@ object SessionTracker {
         val startedMs: Long,
         /** Conversation title (first user text) — "" until known. */
         val title: String = "",
+        /**
+         * Name the CLIENT supplied for this session, capped — "" when it
+         * sent none. Set from `x-session-name` / `x-session-title` or from
+         * request-body metadata (see [nameOf]); see [displayName] for how
+         * it ranks against the other identity sources.
+         */
+        val clientName: String = "",
+        /** Which rung produced [clientName]: "header", "body", or "". */
+        val nameSource: String = "",
         /** Latest routing event ("429 → key-b", "spill → openrouter/m") + time. */
         val lastEvent: String = "",
         val lastEventMs: Long = 0L,
@@ -80,12 +98,173 @@ object SessionTracker {
          * harvested id when there is one, else the key label ("(client
          * key)" inside a tunnel) — never blank, never the raw session
          * UUID, which is meaningless outside the proxy.
+         *
+         * Superseded for display by [displayName], which also honours a
+         * client-supplied name; kept as the compact id-or-key form.
          */
         val displayLabel: String
             get() = remoteId.ifBlank { keyLabel }
 
+        /**
+         * The session's display NAME, resolved by this precedence — the
+         * single place the contract lives (see [resolveName]):
+         *
+         *  1. [clientName] from the request header `x-session-name`
+         *     (alias `x-session-title`) — the only source where the human
+         *     picked the label, so it wins outright.
+         *  2. [clientName] from request-body metadata
+         *     (`metadata.session_name` and friends) — also chosen by the
+         *     human, but weaker than a header: bodies are proxied
+         *     verbatim upstream, so a name there is convention, not
+         *     contract.
+         *  3. [remoteId] (`msg_…` / `chatcmpl-…` / `request-id`) — not a
+         *     name, but it is the stable correlator: it is what the CLI
+         *     agent prints in its own logs, so a proxy row can be joined
+         *     to the agent run. Preferred over the key label because
+         *     "(client key)" is identical on every row and makes the
+         *     list unreadable.
+         *  4. `(client key) @ host` — the historical fallback, used only
+         *     when nothing above exists (plain CONNECT, no client name,
+         *     no harvestable id).
+         *
+         * Never blank.
+         */
+        val displayName: String get() = resolveName(clientName, remoteId, keyLabel, host)
+
+        /**
+         * Short one-line description of what the session is: the
+         * conversation title (first user turn, capped at
+         * [MAX_TITLE_CHARS]), else the model, else the provider, else the
+         * host. Never blank — a session must always be describable.
+         */
+        val description: String get() = describe(title, model, providerId, host)
+
         /** in + out, for the "tokens" column. */
         fun totalTokens(): Long = inputTokens + outputTokens
+    }
+
+    /**
+     * The name contract as one pure function, so precedence is testable
+     * and both [SessionInfo.displayName] and the UI agree on it.
+     *
+     * Rungs, highest first:
+     *  1. [clientName] — header `x-session-name` (alias
+     *     `x-session-title`), else request-body metadata. The client
+     *     chose it, so nothing may override it.
+     *  2. [remoteId] — the provider's own response id, the stable
+     *     correlator with the CLI agent's own logs.
+     *  3. `(client key) @ host` — the historical last resort.
+     *
+     * [host] is optional: the UI passes `providerId/model` for brokered
+     * sessions (which is what it used to show) and the bare host for
+     * tunnels. Blank anywhere in rung 3 falls back to the key label alone.
+     */
+    fun resolveName(clientName: String, remoteId: String, keyLabel: String, host: String = ""): String {
+        if (clientName.isNotBlank()) return clientName
+        if (remoteId.isNotBlank()) return remoteId
+        val key = keyLabel.ifBlank { "(client key)" }
+        return if (host.isNotBlank()) "$key @ $host" else key
+    }
+
+    /**
+     * Short description, pure: the conversation title wins; otherwise the
+     * most specific thing known about the session (model, then provider,
+     * then host). Never returns "".
+     */
+    fun describe(title: String, model: String = "", providerId: String = "", host: String = ""): String =
+        listOf(title, model, providerId, host).firstOrNull { it.isNotBlank() } ?: "session"
+
+    /**
+     * The client's session NAME for one request, in the precedence the
+     * dashboard renders: header [NAME_HEADER_KEYS] first (an explicit,
+     * out-of-band declaration), then request-body [BODY_NAME_KEYS]
+     * (metadata convention). "" when the client sent none — the caller
+     * then falls through to the harvested id, per [resolveName].
+     *
+     * [body] may be a bare JSON body or a tapped MITM request (HTTP head
+     * + body): [jsonBody] strips the head, same as [titleOf].
+     */
+    fun nameOf(headers: Map<String, String>?, body: ByteArray? = null): String {
+        val fromHeader = headerNameOf(headers)
+        if (fromHeader.isNotBlank()) return fromHeader
+        return bodyNameOf(body)
+    }
+
+    /**
+     * [nameOf] for a raw tapped request: the head's headers and the body
+     * both count, so the MITM path (which only has the tap bytes) gets
+     * the same contract as the plain-HTTP path.
+     */
+    fun nameFromRequestHead(tap: ByteArray?): String {
+        if (tap == null || tap.isEmpty()) return ""
+        val headEnd = indexOfHeaderEnd(tap)
+        if (headEnd < 0) return nameOf(null, tap)
+        val head = String(tap, 0, headEnd, Charsets.ISO_8859_1)
+        val headers = HashMap<String, String>()
+        head.lineSequence().drop(1).forEach { line ->
+            val i = line.indexOf(':')
+            if (i <= 0) return@forEach
+            val k = line.substring(0, i).trim().lowercase()
+            val v = line.substring(i + 1).trim()
+            if (k.isNotEmpty() && v.isNotEmpty()) headers.putIfAbsent(k, v)
+        }
+        return nameOf(headers, tap)
+    }
+
+    /**
+     * `x-session-name` (alias `x-session-title`), case-insensitive and
+     * precedence-ordered; "" when absent or unusable ([cleanName]).
+     */
+    fun headerNameOf(headers: Map<String, String>?): String {
+        if (headers.isNullOrEmpty()) return ""
+        val lower = HashMap<String, String>(headers.size * 2)
+        for ((k, v) in headers) {
+            val lk = k.lowercase()
+            if (lk !in lower) lower[lk] = v
+        }
+        for (key in NAME_HEADER_KEYS) {
+            cleanName(lower[key])?.let { return it }
+        }
+        return ""
+    }
+
+    /**
+     * Name out of the request body's `metadata` object, else the top-level
+     * [BODY_NAME_KEYS]. Agents that already pass conversation metadata
+     * (`metadata.session_name` on OpenAI-compatible gateways,
+     * `metadata.name` / `metadata.title` on others) name the run there;
+     * "" when they do not. Reads at most [TAP_CAP_BYTES] and never throws.
+     */
+    fun bodyNameOf(body: ByteArray?): String {
+        if (body == null || body.isEmpty() || body.size > TAP_CAP_BYTES) return ""
+        val json = jsonBody(body)
+        if (json.isEmpty()) return ""
+        return try {
+            val o = org.json.JSONObject(json.toString(Charsets.UTF_8))
+            val meta = o.optJSONObject("metadata")
+            val found = BODY_NAME_KEYS.firstNotNullOfOrNull { k -> cleanName(meta?.optString(k, "")) }
+                ?: TOP_LEVEL_NAME_KEYS.firstNotNullOfOrNull { k -> cleanName(o.optString(k, "")) }
+            found ?: ""
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    /**
+     * A usable client name: trimmed, whitespace-collapsed, control
+     * characters dropped, capped at [MAX_NAME_CHARS]. Rejects the empty
+     * string and anything that is only punctuation — the gate that stops
+     * a prompt fragment from becoming a session's headline.
+     */
+    internal fun cleanName(raw: String?): String? {
+        if (raw == null) return null
+        val v = raw.map { if (it.isISOControl()) ' ' else it }
+            .joinToString("")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        if (v.isEmpty() || v.length > MAX_NAME_CHARS * 4) return null
+        if (v.none { it.isLetterOrDigit() }) return null
+        return if (v.length <= MAX_NAME_CHARS) v else v.take(MAX_NAME_CHARS).trimEnd() + "…"
     }
 
     /**
@@ -102,6 +281,11 @@ object SessionTracker {
      * @param remoteId harvested provider id, if already known (blank
      *   keeps any id a previous [note]/[noteResponse] stored).
      * @param title conversation title, capped; blank keeps the previous.
+     * @param name client-supplied session name ([nameOf]), capped; blank
+     *   keeps the previous, so a mid-request re-note (key rollover) that
+     *   has no name cannot erase one already harvested.
+     * @param nameSource which rung produced [name] ("header" / "body"),
+     *   informational; blank keeps the previous tag.
      */
     @Synchronized
     fun note(
@@ -112,15 +296,20 @@ object SessionTracker {
         host: String,
         startedMs: Long = System.currentTimeMillis(),
         title: String = "",
-        remoteId: String = ""
+        remoteId: String = "",
+        name: String = "",
+        nameSource: String = ""
     ) {
         // Preserve the original start time (and title, unless a new one
         // arrives) across key rotations mid-request.
         val prev = sessions[sessionId]
+        val name0 = cleanName(name)
         sessions[sessionId] = SessionInfo(
             sessionId, providerId, keyLabel, model, host,
             prev?.startedMs ?: startedMs,
             capTitle(title).ifBlank { prev?.title ?: "" },
+            name0 ?: prev?.clientName ?: "",
+            nameSource.ifBlank { prev?.nameSource ?: "" },
             prev?.lastEvent ?: "",
             prev?.lastEventMs ?: 0L,
             (cleanId(remoteId) ?: "").ifBlank { prev?.remoteId ?: "" },
@@ -474,6 +663,25 @@ object SessionTracker {
     const val SOURCE_CHATCMPL = "chatcmpl"
     const val SOURCE_PAYLOAD = "payload"
     const val SOURCE_HEADER = "header"
+
+    /** Request-body metadata keys that may carry the session name. */
+    const val SOURCE_BODY = "body"
+
+    /**
+     * Request-header name keys, highest precedence first. `x-session-name`
+     * is the contract; `x-session-title` is the alias accepted because
+     * several clients already spell it that way.
+     */
+    val NAME_HEADER_KEYS = listOf("x-session-name", "x-session-title")
+
+    /** Body-metadata keys, highest precedence first. */
+    val BODY_NAME_KEYS = listOf("session_name", "session_title", "name", "title")
+
+    /**
+     * Top-level body keys, checked only when there is no `metadata`
+     * object — some clients put the name straight on the request.
+     */
+    val TOP_LEVEL_NAME_KEYS = listOf("session_name", "session_title")
 
     /** Response-header id keys, highest precedence first. */
     val HEADER_ID_KEYS = listOf("request-id", "x-request-id", "openai-request-id", "x-amzn-requestid")
