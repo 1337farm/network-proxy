@@ -433,10 +433,10 @@ object SessionTracker {
         if (found[0] == 0L && found[1] == 0L && found[2] == 0L && found[3] == 0L) return
         val prev = sessions[sessionId] ?: return
         sessions[sessionId] = prev.copy(
-            inputTokens = prev.inputTokens + found[0],
-            outputTokens = prev.outputTokens + found[1],
-            cacheReadTokens = prev.cacheReadTokens + found[2],
-            cacheWriteTokens = prev.cacheWriteTokens + found[3],
+            inputTokens = found[0],
+            outputTokens = found[1],
+            cacheReadTokens = found[2],
+            cacheWriteTokens = found[3],
             touchedMs = System.currentTimeMillis()
         )
     }
