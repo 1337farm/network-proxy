@@ -20,8 +20,8 @@ android {
                     val count = proc.inputStream.bufferedReader().readText().trim().toIntOrNull()
                     proc.waitFor()
                     if (count != null && count > 0) count * 1_000 + 1
-                    else 1_000_001
-                } catch (_: Exception) { 1_000_001 }
+                    else 1
+                } catch (_: Exception) { 1 }
             }
         // Version name = short git SHA (CI: GITHUB_SHA, local: git rev-parse).
         // Included in APK filename automatically by the Android plugin.
