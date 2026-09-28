@@ -864,7 +864,7 @@ ProxyMetrics.recordUsage(host, modelOf(body), requestId, found)
             val reqTap = java.io.ByteArrayOutputStream()
             val reqTapCap = 256 * 1024
             val t1 = Thread { relayTap(cIn, uOut, upBytes, reqTap, reqTapCap, modelRef = upModel) }
-            val t2 = Thread { relayTap(uIn, cOut, downBytes, tap, tapCap, liveUsage, host, requestId, upModel, false) }
+            val t2 = Thread { relayTap(uIn, cOut, downBytes, tap, tapCap, liveUsage, host, requestId, upModel, false, sessionId) }
             t1.start(); t2.start()
             t1.join(); t2.join()
             // Backfill the sniffed upstream model + conversation title
@@ -1000,7 +1000,8 @@ ProxyMetrics.recordUsage(host, upModel.get(), requestId, tail)
         usageHost: String = "",
         requestId: String? = null,
         modelRef: java.util.concurrent.atomic.AtomicReference<String>? = null,
-        sniff: Boolean = true
+        sniff: Boolean = true,
+        sessionId: String? = null
     ) {
         val head = java.io.ByteArrayOutputStream()
         val headCap = 4096
@@ -1025,6 +1026,7 @@ ProxyMetrics.recordUsage(host, upModel.get(), requestId, tail)
                     val found = liveUsage.feed(buf, n)
                     if (found[0] + found[1] + found[2] + found[3] > 0) {
                         ProxyMetrics.recordUsage(usageHost, modelRef?.get() ?: "", requestId, found)
+                        SessionTracker.noteUsage(sessionId, found)
                         ProxyMetrics.event(
                             "Tokens $usageHost in=${found[0]} out=${found[1]} " +
                                 "cacheR=${found[2]} cacheW=${found[3]} (live)"
