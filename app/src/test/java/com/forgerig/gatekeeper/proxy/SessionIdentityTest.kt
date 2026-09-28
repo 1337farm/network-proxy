@@ -214,22 +214,21 @@ class SessionIdentityTest {
     // ---- per-session token usage --------------------------------------
 
     @Test
-    fun perSessionUsageAccumulates() {
+    fun perSessionUsageSetsCumulative() {
         SessionTracker.note("u1", "zen", "(client key)", "claude", "api.anthropic.com", 1000)
         SessionTracker.noteUsage("u1", longArrayOf(100, 20, 50, 10))
         SessionTracker.noteUsage("u1", longArrayOf(7, 3, 0, 2))
         val s = SessionTracker.snapshot().single()
-        assertEquals(107L, s.inputTokens)
-        assertEquals(23L, s.outputTokens)
-        assertEquals(50L, s.cacheReadTokens)
-        assertEquals(12L, s.cacheWriteTokens)
-        assertEquals(130L, s.totalTokens())
+        assertEquals(7L, s.inputTokens)
+        assertEquals(3L, s.outputTokens)
+        assertEquals(0L, s.cacheReadTokens)
+        assertEquals(2L, s.cacheWriteTokens)
+        assertEquals(10L, s.totalTokens())
 
-        // A key rotation mid-request must not reset the tallies.
         SessionTracker.note("u1", "openrouter", "key-b", "claude", "openrouter.ai", 1000)
         SessionTracker.noteUsage("u1", longArrayOf(1, 1, 0, 0))
         val after = SessionTracker.snapshot().single()
-        assertEquals(108L, after.inputTokens)
+        assertEquals(1L, after.inputTokens)
         assertEquals("openrouter", after.providerId)
         assertEquals(1000L, after.startedMs)
 
@@ -241,8 +240,8 @@ class SessionIdentityTest {
         SessionTracker.noteUsage("u1", LongArray(0))
         SessionTracker.noteUsage("u1", longArrayOf(0, 0, 0, 0))
         val final = SessionTracker.snapshot().single()
-        assertEquals(108L, final.inputTokens)
-        assertEquals(24L, final.outputTokens)
+        assertEquals(1L, final.inputTokens)
+        assertEquals(1L, final.outputTokens)
         assertEquals(1, SessionTracker.size())
     }
 
