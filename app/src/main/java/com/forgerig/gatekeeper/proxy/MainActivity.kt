@@ -27,6 +27,8 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS = "gatekeeper"
         private const val KEY_SHOULD_RUN = "proxyShouldRun"
         private const val KEY_NOTIF_ASKED = "notifPermissionAsked"
+        /** Verbose response payload logging (ProxyService reads the same key). */
+        const val VERBOSE_LOGGING_PREF = "verbose_logging"
     }
 
     private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -122,6 +124,16 @@ class MainActivity : AppCompatActivity() {
         var cleanupScriptExpanded = false
         val portInput = findViewById<TextInputEditText>(R.id.portInput)
         // Metrics + Decrypt-HTTPS are always on (no toggles by design).
+
+        // Verbose response logging: opt-in capture of response payloads
+        // into the in-memory ResponseLog ring (ProxyService reads the
+        // same pref). Restored from the pref so the checkbox survives
+        // restarts; the proxy picks the value up per request.
+        val verboseLoggingCheckbox = findViewById<MaterialCheckBox>(R.id.verboseLoggingCheckbox)
+        verboseLoggingCheckbox.isChecked = prefs().getBoolean(VERBOSE_LOGGING_PREF, false)
+        verboseLoggingCheckbox.setOnCheckedChangeListener { _, isChecked ->
+            prefs().edit().putBoolean(VERBOSE_LOGGING_PREF, isChecked).apply()
+        }
 
         // Auto-start: ensure the proxy is running on app start unless the
         // user explicitly stopped it (Stop persists the opt-out).
@@ -572,6 +584,7 @@ class MainActivity : AppCompatActivity() {
         }
         renderRateHeading()
         renderSessionsList(svc)
+        renderResponseLog()
         val hosts = ProxyMetrics.hostSummary(3)
         findViewById<TextView>(R.id.hostsText)?.text =
             if (hosts.isEmpty()) ""
@@ -809,6 +822,61 @@ class MainActivity : AppCompatActivity() {
             }
             list.addView(more)
         }
+    }
+
+    /**
+     * Verbose response log: one tappable row per retained payload, newest
+     * first — host, content type, and the 200-char preview. Hidden
+     * entirely while the log is empty (toggle off, or no JSON/SSE
+     * responses captured yet). Tapping a row opens the full body in a
+     * scrollable dialog.
+     */
+    private fun renderResponseLog() {
+        val list = findViewById<android.widget.LinearLayout>(R.id.responseLogList) ?: return
+        list.removeAllViews()
+        val entries = ResponseLog.snapshot()
+        if (entries.isEmpty()) {
+            list.visibility = View.GONE
+            return
+        }
+        list.visibility = View.VISIBLE
+        val hint = getColor(R.color.hint_text)
+        for (e in entries) {
+            val row = TextView(this).apply {
+                text = buildString {
+                    append(e.host)
+                    if (e.contentType.isNotBlank()) append(" · ${e.contentType}")
+                    append(" · ${StatsFormat.humanAge(e.timestampMs, System.currentTimeMillis())}\n")
+                    append(e.preview())
+                }
+                textSize = 11f
+                typeface = android.graphics.Typeface.MONOSPACE
+                setTextColor(hint)
+                isClickable = true
+                setOnClickListener { showResponseBody(e) }
+            }
+            list.addView(row)
+        }
+    }
+
+    /** Full body of one response-log entry in a scrollable dialog. */
+    private fun showResponseBody(entry: ResponseLog.ResponseEntry) {
+        val tv = TextView(this).apply {
+            text = String(entry.body, Charsets.UTF_8)
+            textSize = 11f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextIsSelectable(true)
+            setPadding(48, 24, 48, 24)
+        }
+        val scroll = android.widget.ScrollView(this).apply { addView(tv) }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle(
+                entry.host.ifBlank { "response" } +
+                    if (entry.contentType.isNotBlank()) " — ${entry.contentType}" else ""
+            )
+            .setView(scroll)
+            .setPositiveButton("Close", null)
+            .show()
     }
 
     /** Hairline rule between table sections (header / TOTAL). */

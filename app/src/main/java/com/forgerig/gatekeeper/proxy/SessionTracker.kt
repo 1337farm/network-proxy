@@ -56,6 +56,17 @@ object SessionTracker {
     /** Ids are opaque handles; anything longer is content, not an id. */
     const val MAX_ID_CHARS = 64
 
+    /**
+     * Session-id cap: `x-session-id` values are conversation handles
+     * (UUIDs, gateway tokens), so the alphabet is the handle alphabet of
+     * [cleanId] but the cap is wider than [MAX_ID_CHARS] — anything past
+     * it is content, not an id.
+     */
+    const val MAX_SESSION_ID_CHARS = 128
+
+    /** Request header carrying the client's conversation id (see [sessionIdOf]). */
+    const val ID_HEADER_KEY = "x-session-id"
+
     data class SessionInfo(
         val sessionId: String,
         val providerId: String,
@@ -229,6 +240,23 @@ object SessionTracker {
     }
 
     /**
+     * The client's conversation id out of the request headers —
+     * [ID_HEADER_KEY], case-insensitive; "" when absent or unusable
+     * ([cleanId] gated at [MAX_SESSION_ID_CHARS]). The caller swaps the
+     * per-request UUID for this so every request in one conversation
+     * lands on a single session row.
+     */
+    fun sessionIdOf(headers: Map<String, String>?): String {
+        if (headers.isNullOrEmpty()) return ""
+        val lower = HashMap<String, String>(headers.size * 2)
+        for ((k, v) in headers) {
+            val lk = k.lowercase()
+            if (lk !in lower && v.isNotBlank()) lower[lk] = v
+        }
+        return cleanId(lower[ID_HEADER_KEY], MAX_SESSION_ID_CHARS) ?: ""
+    }
+
+    /**
      * Name out of the request body's `metadata` object, else the top-level
      * [BODY_NAME_KEYS]. Agents that already pass conversation metadata
      * (`metadata.session_name` on OpenAI-compatible gateways,
@@ -321,6 +349,26 @@ object SessionTracker {
             System.currentTimeMillis()
         )
         evictOverflow()
+    }
+
+    /**
+     * Rename a live session from a client-supplied name (the
+     * `x-session-name` header arriving on a later request of the same
+     * conversation): updates [SessionInfo.clientName] and stamps
+     * [SessionInfo.nameSource] "header". No-op for an unknown session
+     * or a blank/unusable name ([cleanName]) — a rename must never
+     * erase a name another source already harvested.
+     */
+    @Synchronized
+    fun renameSession(sessionId: String, name: String) {
+        if (sessionId.isEmpty()) return
+        val cleaned = cleanName(name) ?: return
+        val prev = sessions[sessionId] ?: return
+        sessions[sessionId] = prev.copy(
+            clientName = cleaned,
+            nameSource = "header",
+            touchedMs = System.currentTimeMillis()
+        )
     }
 
     /** Stamp a routing event (429, rollover, spill) onto a live session. */
@@ -584,14 +632,15 @@ object SessionTracker {
     }
 
     /**
-     * A plausible id: non-blank, ≤[MAX_ID_CHARS], and restricted to
+     * A plausible id: non-blank, ≤[maxChars], and restricted to
      * handle characters. This is what stops garbage — a nested object
      * stringified by `optString`, a prompt fragment, a 4 KB blob — from
-     * becoming a session's identity.
+     * becoming a session's identity. [maxChars] defaults to
+     * [MAX_ID_CHARS]; session ids get the wider [MAX_SESSION_ID_CHARS].
      */
-    internal fun cleanId(raw: String?): String? {
+    internal fun cleanId(raw: String?, maxChars: Int = MAX_ID_CHARS): String? {
         val v = raw?.trim() ?: return null
-        if (v.isEmpty() || v.length > MAX_ID_CHARS) return null
+        if (v.isEmpty() || v.length > maxChars) return null
         for (c in v) {
             val ok = c in 'a'..'z' || c in 'A'..'Z' || c in '0'..'9' ||
                 c == '_' || c == '-' || c == '.' || c == ':'

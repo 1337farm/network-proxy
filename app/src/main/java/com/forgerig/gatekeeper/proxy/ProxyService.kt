@@ -5,6 +5,7 @@ package com.forgerig.gatekeeper.proxy
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.net.wifi.WifiManager
 import android.os.Binder
@@ -262,7 +263,7 @@ class ProxyService : Service() {
     }
 
     private fun handleClient(socket: Socket) {
-        val sessionId = UUID.randomUUID().toString()
+        var sessionId = UUID.randomUUID().toString()
         val requestId = UUID.randomUUID().toString()
         val startedAt = System.currentTimeMillis()
         activeSessions.add(sessionId)
@@ -310,6 +311,21 @@ class ProxyService : Service() {
                     if (key.equals("Retry-After", true)) retryAfterHeaders.add(value)
                 }
                 line = readLine(rawIn)
+            }
+
+            // Session correlation: `x-session-id` names the conversation
+            // this request belongs to. When the client sends it, the
+            // per-request UUID is swapped for it here — after header
+            // parsing, before anything downstream — so every request in
+            // one conversation lands on a single session row. The CONNECT
+            // branch above already returned and keeps its own UUID. The
+            // UUID's slot in activeSessions is swapped with the new id so
+            // the finally block releases the id actually in use.
+            val clientSessionId = SessionTracker.sessionIdOf(headers)
+            if (clientSessionId.isNotEmpty()) {
+                activeSessions.remove(sessionId)
+                sessionId = clientSessionId
+                activeSessions.add(sessionId)
             }
 
             // Local CA fetch: `curl http://127.0.0.1:<port>/ca.pem` serves
@@ -436,6 +452,14 @@ class ProxyService : Service() {
                 }.forEach { mutableHeaders.remove(it) }
                 mutableHeaders[p.authHeader] = store.authValue(p, k)
             }
+            // Session correlation headers are proxy-internal metadata:
+            // stripped before forwarding, unconditionally (not just on
+            // key-swap) so the upstream never sees them.
+            mutableHeaders.keys.filter {
+                it.equals(SessionTracker.ID_HEADER_KEY, true) ||
+                    it.equals("x-session-name", true) ||
+                    it.equals("x-session-title", true)
+            }.forEach { mutableHeaders.remove(it) }
             // Feed the observed-model registry (spillover candidates) with
             // the upstream model actually requested (post route-rewrite).
             if (provider != null && body != null) {
@@ -456,6 +480,10 @@ class ProxyService : Service() {
                     name = SessionTracker.nameOf(headers, body)
                 )
             }
+            // A request may carry the conversation's display name on a
+            // later turn; note() only sets it at registration, so refresh
+            // it here (no-op for an unknown session).
+            SessionTracker.renameSession(sessionId, SessionTracker.nameOf(headers, body))
             var finalCode = -1
             var transferredTotal = 0L
             var keyRounds = 0
@@ -599,6 +627,13 @@ class ProxyService : Service() {
                             }
                         }
                         output.flush()
+                        // Verbose log: the full tapped body, stored only
+                        // after the stream loop has drained (the tap is
+                        // complete). JSON/SSE responses only — the tap is
+                        // null for other content types.
+                        if (verboseLogging()) {
+                            tap?.let { ResponseLog.add(host, respContentType, it.toByteArray()) }
+                        }
                         requestCount.incrementAndGet()
                         bytesOut.addAndGet(transferred)
                         ProxyMetrics.addBytes(host, reqBytes, transferred)
@@ -867,6 +902,12 @@ ProxyMetrics.recordUsage(host, modelOf(body), requestId, found)
             val t2 = Thread { relayTap(uIn, cOut, downBytes, tap, tapCap, liveUsage, host, requestId, upModel, false, sessionId) }
             t1.start(); t2.start()
             t1.join(); t2.join()
+            // Verbose log: the decrypted response body (tap), stored once
+            // both relay directions have drained. The tap is the raw
+            // decrypted response (head + body), HTTP head included.
+            if (verboseLogging()) {
+                ResponseLog.add(host, "", tap.toByteArray())
+            }
             // Backfill the sniffed upstream model + conversation title
             // into the session note (both blank at CONNECT time), plus
             // the client's session name off the tapped request head/body.
@@ -1536,6 +1577,15 @@ ProxyMetrics.recordUsage(host, upModel.get(), requestId, tail)
             ""
         }
     }
+
+    /**
+     * Verbose response payload logging toggle, shared with the dashboard
+     * checkbox (MainActivity.VERBOSE_LOGGING_PREF). Off by default: the
+     * response bodies this retains are model output, so capturing them
+     * is opt-in.
+     */
+    private fun verboseLogging(): Boolean =
+        getSharedPreferences("gatekeeper", Context.MODE_PRIVATE).getBoolean("verbose_logging", false)
 
     // ---- Streaming payload trims (extreme, but client-safe) ----
     private val keepHeaders = setOf(
