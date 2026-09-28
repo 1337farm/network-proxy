@@ -201,6 +201,28 @@
                         android:orientation="vertical">
                     </LinearLayout>
 
+                    <!-- Verbose response payloads (opt-in via the
+                         Configuration checkbox). One tappable row per
+                         retained response, newest first; tap for the
+                         full body. Hidden while the log is empty. -->
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:text="Response Log"
+                        android:textSize="13sp"
+                        android:textStyle="bold"
+                        style="@style/Text.SectionTitle"/>
+
+                    <LinearLayout
+                        android:id="@+id/responseLogList"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:orientation="vertical"
+                        android:visibility="gone">
+                    </LinearLayout>
+
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
@@ -233,13 +255,23 @@
                         android:hint="@string/port_hint"
                         style="@style/Widget.Material3.TextInputLayout.OutlinedBox">
 
-                        <com.google.android.material.textfield.TextInputEditText
-                            android:id="@+id/portInput"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:inputType="number"
-                            android:text="3128"/>
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/portInput"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:inputType="number"
+                        android:text="3128"/>
                     </com.google.android.material.textfield.TextInputLayout>
+
+                    <!-- Opt-in capture of response payloads into the
+                         in-memory Response Log (see ResponseLog). Off by
+                         default: the bodies are model output. -->
+                    <com.google.android.material.checkbox.MaterialCheckBox
+                        android:id="@+id/verboseLoggingCheckbox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="Verbose response logging"/>
 
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
