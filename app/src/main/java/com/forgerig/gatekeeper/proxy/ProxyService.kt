@@ -610,11 +610,12 @@ class ProxyService : Service() {
                                     // One call credits tallies + rate sampler
                                     // together (see recordUsage). Model is the
                                     // upstream id actually requested.
-                                    ProxyMetrics.recordUsage(host, modelOf(body), requestId, found)
-                                    ProxyMetrics.event(
-                                        "Tokens $host in=${found[0]} out=${found[1]} " +
-                                            "cacheR=${found[2]} cacheW=${found[3]}"
-                                    )
+ProxyMetrics.recordUsage(host, modelOf(body), requestId, found)
+                                     SessionTracker.noteUsage(sessionId, found)
+                                     ProxyMetrics.event(
+                                         "Tokens $host in=${found[0]} out=${found[1]} " +
+                                             "cacheR=${found[2]} cacheW=${found[3]}"
+                                     )
                                 }
                             }
                         }
@@ -892,6 +893,7 @@ class ProxyService : Service() {
                 val found = ProxyMetrics.scanTapBytesForClose(tap.toByteArray())
                 if (found[0] + found[1] + found[2] + found[3] > 0) {
                     ProxyMetrics.recordUsage(host, upModel.get(), requestId, found)
+                    SessionTracker.noteUsage(sessionId, found)
                     ProxyMetrics.event(
                         "Tokens $host in=${found[0]} out=${found[1]} " +
                             "cacheR=${found[2]} cacheW=${found[3]} (mitm encoded)"
@@ -903,11 +905,12 @@ class ProxyService : Service() {
             // live counts and the encoded-body fallback above.
             val tail = liveUsage.flush()
             if (tail[0] + tail[1] + tail[2] + tail[3] > 0) {
-                ProxyMetrics.recordUsage(host, upModel.get(), requestId, tail)
-                ProxyMetrics.event(
-                    "Tokens $host in=${tail[0]} out=${tail[1]} " +
-                        "cacheR=${tail[2]} cacheW=${tail[3]} (live tail)"
-                )
+ProxyMetrics.recordUsage(host, upModel.get(), requestId, tail)
+                    SessionTracker.noteUsage(sessionId, tail)
+                    ProxyMetrics.event(
+                        "Tokens $host in=${tail[0]} out=${tail[1]} " +
+                            "cacheR=${tail[2]} cacheW=${tail[3]} (live tail)"
+                    )
             }
             val ms = System.currentTimeMillis() - startedAt
             ProxyMetrics.event(
