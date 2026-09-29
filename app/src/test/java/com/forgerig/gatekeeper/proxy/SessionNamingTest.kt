@@ -87,6 +87,82 @@ class SessionNamingTest {
     }
 
     @Test
+    fun requestBodyFramingIsReadFromTheHead() {
+        // Attributing a session while the tunnel is still open depends on
+        // knowing where THIS request ends, so the framing headers have to be
+        // parsed case-insensitively and a malformed one has to degrade to
+        // "unknown" rather than to a bogus byte count.
+        fun head(extra: String) = bytes("POST /v1/chat/completions HTTP/1.1\r\nHost: h\r\n$extra\r\n")
+        assertEquals(1234L, ProxyService.contentLengthForTest(head("content-length: 1234")))
+        assertEquals(0L, ProxyService.contentLengthForTest(head("Content-Length: 0")))
+        assertEquals(7L, ProxyService.contentLengthForTest(head("CONTENT-LENGTH:   7  ")))
+        assertTrue(ProxyService.isChunkedForTest(head("transfer-encoding: chunked")))
+        assertTrue(ProxyService.isChunkedForTest(head("Transfer-Encoding: Chunked")))
+        // No framing at all -> the caller must fall back to reading to EOF.
+        assertEquals(-1L, ProxyService.contentLengthForTest(head("accept: */*")))
+        assertFalse(ProxyService.isChunkedForTest(head("accept: */*")))
+        // Malformed values must not be trusted as a length.
+        assertEquals(-1L, ProxyService.contentLengthForTest(head("content-length: banana")))
+        assertEquals(-1L, ProxyService.contentLengthForTest(head("content-length: -5")))
+        // The request line must never be mistaken for a header.
+        assertEquals(-1L, ProxyService.contentLengthForTest(bytes("GET content-length: 9 HTTP/1.1\r\n\r\n")))
+    }
+
+    @Test
+    fun framedBodyIsRelayedVerbatimAndAttributionCanRunEarly() {
+        // The whole point: relay exactly Content-Length bytes and stop, so
+        // the caller can attribute the session without waiting for the peer
+        // to close. Everything must arrive upstream byte-for-byte, framing
+        // included, or the provider rejects the request.
+        val body = """{"model":"anthropic/claude-sonnet-4","messages":[{"role":"user","content":"hi"}]}"""
+        val head = bytes("POST /v1/chat/completions HTTP/1.1\r\nHost: openrouter.ai\r\ncontent-length: ${body.length}\r\n\r\n")
+        val raw = head + bytes(body)
+        val out = java.io.ByteArrayOutputStream()
+        val tap = java.io.ByteArrayOutputStream()
+        val counter = java.util.concurrent.atomic.AtomicLong()
+        val moved = ProxyService.relayExactlyForTest(
+            java.io.ByteArrayInputStream(raw, head.size, raw.size - head.size), out, counter, tap, 1 shl 20,
+            ProxyService.contentLengthForTest(head)
+        )
+        assertEquals(body.length.toLong(), moved)
+        assertEquals(body, String(out.toByteArray(), Charsets.ISO_8859_1))
+        assertEquals(body.length.toLong(), counter.get())
+        // The tap holds head+body, which is what the model is sniffed from.
+        assertEquals("anthropic/claude-sonnet-4", ProxyMetrics.sniffModel(head + tap.toByteArray(), head.size + tap.size()))
+    }
+
+    @Test
+    fun chunkedBodyIsRelayedAndStopsAtTheTerminator() {
+        val out = java.io.ByteArrayOutputStream()
+        val counter = java.util.concurrent.atomic.AtomicLong()
+        val wire = bytes(
+            "5\r\nhello\r\n" +
+            "6;ext=1\r\n world\r\n" +
+            "0\r\n\r\n"
+        )
+        val moved = ProxyService.relayChunkedForTest(
+            java.io.ByteArrayInputStream(wire), out, counter, null, 1 shl 20
+        )
+        // Payload plus the CRLF after each chunk; the size lines are framing
+        // and must NOT be sent to the provider.
+        assertEquals("hello\r\n world\r\n".length.toLong(), moved)
+        assertEquals("hello\r\n world\r\n", String(out.toByteArray(), Charsets.ISO_8859_1))
+    }
+
+    @Test
+    fun aTruncatedBodyStopsWithoutHangingOrOverForwarding() {
+        // Peer hangs up mid-body: relay what arrived, report the short count,
+        // never pad and never block.
+        val out = java.io.ByteArrayOutputStream()
+        val moved = ProxyService.relayExactlyForTest(
+            java.io.ByteArrayInputStream(bytes("short")), out,
+            java.util.concurrent.atomic.AtomicLong(), null, 1 shl 20, 5000
+        )
+        assertEquals(5L, moved)
+        assertEquals("short", String(out.toByteArray(), Charsets.ISO_8859_1))
+    }
+
+    @Test
     fun connectUuidIsMigratedToTheClientIdWithNameAndModel() {
         // Reproduces what attributeRequest() now does on the MITM path, in
         // order: the CONNECT-time UUID row is moved onto the client's own id
