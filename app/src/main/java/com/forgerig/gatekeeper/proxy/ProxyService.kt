@@ -88,6 +88,172 @@ class ProxyService : Service() {
          * through, request line and CRLFCRLF included, so the head still
          * parses upstream.
          */
+        /**
+         * Test shims for the body-framing helpers. Knowing where one request
+         * ends is the whole ballgame for attributing a session while the
+         * connection is still open, so it is covered by tests.
+         */
+        @JvmStatic
+        fun contentLengthForTest(head: ByteArray): Long = contentLengthOf(head)
+
+        @JvmStatic
+        fun isChunkedForTest(head: ByteArray): Boolean = isChunked(head)
+
+        @JvmStatic
+        fun relayExactlyForTest(
+            input: java.io.InputStream,
+            output: java.io.OutputStream,
+            counter: java.util.concurrent.atomic.AtomicLong,
+            tap: java.io.ByteArrayOutputStream?,
+            tapCap: Int,
+            total: Long
+        ): Long = relayExactly(input, output, counter, tap, tapCap, total)
+
+        @JvmStatic
+        fun relayChunkedForTest(
+            input: java.io.InputStream,
+            output: java.io.OutputStream,
+            counter: java.util.concurrent.atomic.AtomicLong,
+            tap: java.io.ByteArrayOutputStream?,
+            tapCap: Int
+        ): Long = relayChunkedBody(input, output, counter, tap, tapCap)
+
+        /**
+         * Forwards exactly [total] body bytes, then returns. Used by the MITM
+         * path to finish one request without waiting for the connection to
+         * close: the caller can then attribute the session while the tunnel is
+         * still up. Returns the number of bytes actually moved, which is short
+         * of [total] only when the peer hung up mid-body.
+         */
+        private fun relayExactly(
+            input: java.io.InputStream,
+            output: java.io.OutputStream,
+            counter: java.util.concurrent.atomic.AtomicLong,
+            tap: java.io.ByteArrayOutputStream?,
+            tapCap: Int,
+            total: Long
+        ): Long {
+            val buf = ByteArray(16 * 1024)
+            var moved = 0L
+            while (moved < total) {
+                val want = minOf(buf.size.toLong(), total - moved).toInt()
+                val n = input.read(buf, 0, want)
+                if (n < 0) break
+                output.write(buf, 0, n)
+                output.flush()
+                counter.addAndGet(n.toLong())
+                moved += n
+                if (tap != null && tap.size() < tapCap) {
+                    tap.write(buf, 0, n.coerceAtMost(tapCap - tap.size()))
+                }
+            }
+            return moved
+        }
+
+        /**
+         * Forwards one chunked body, stopping after the terminating zero-length
+         * chunk (and its trailer). Returns the bytes moved. Like
+         * [relayExactly] this exists so the request can be finished and
+         * attributed without waiting for the connection to close.
+         */
+        private fun relayChunkedBody(
+            input: java.io.InputStream,
+            output: java.io.OutputStream,
+            counter: java.util.concurrent.atomic.AtomicLong,
+            tap: java.io.ByteArrayOutputStream?,
+            tapCap: Int
+        ): Long {
+            val line = java.io.ByteArrayOutputStream()
+            var moved = 0L
+            fun emit(bytes: ByteArray, n: Int) {
+                if (n <= 0) return
+                output.write(bytes, 0, n)
+                counter.addAndGet(n.toLong())
+                moved += n
+                if (tap != null && tap.size() < tapCap) {
+                    tap.write(bytes, 0, n.coerceAtMost(tapCap - tap.size()))
+                }
+            }
+            while (true) {
+                line.reset()
+                // Chunk size line, terminated by CRLF (an LF-only line is
+                // tolerated; providers do send it).
+                var prev = -1
+                while (true) {
+                    val b = input.read()
+                    if (b < 0) return moved
+                    if (b == '\n'.code) {
+                        if (prev == '\r'.code) line.write('\r'.code)
+                        break
+                    }
+                    line.write(b)
+                    prev = b
+                    if (line.size() > 64) return moved
+                }
+                val sizeText = String(line.toByteArray(), Charsets.ISO_8859_1)
+                    .substringBefore(';').trim()
+                val size = sizeText.toLongOrNull(16) ?: return moved
+                if (size <= 0L) {
+                    // Terminating chunk: swallow the trailer up to the blank line.
+                    var tprev = -1
+                    while (true) {
+                        val b = input.read()
+                        if (b < 0) return moved
+                        if (b == '\n'.code && tprev == '\r'.code) break
+                        tprev = b
+                    }
+                    return moved
+                }
+                moved += relayExactly(input, output, counter, tap, tapCap, size)
+                // The CRLF that closes the chunk is framing, not payload, but it
+                // still has to reach the provider verbatim.
+                val cr = input.read()
+                if (cr < 0) return moved
+                val lf = input.read()
+                if (lf < 0) return moved
+                val term = ByteArray(2)
+                term[0] = cr.toByte(); term[1] = lf.toByte()
+                emit(term, 2)
+            }
+        }
+
+        /**
+         * The declared body length of a request head, or -1 when the head
+         * does not declare one. Negative values that are not -1 (a malformed
+         * Content-Length) also come back as -1, so a bad header degrades to
+         * "unknown framing" rather than to a bogus byte count.
+         */
+        private fun contentLengthOf(head: ByteArray): Long {
+            val raw = headerValue(head, "content-length") ?: return -1L
+            val n = raw.trim().toLongOrNull() ?: return -1L
+            return if (n >= 0) n else -1L
+        }
+
+        private fun isChunked(head: ByteArray): Boolean =
+            headerValue(head, "transfer-encoding")
+                ?.contains("chunked", ignoreCase = true) == true
+
+        /** First value of [name] in a request head, matched case-insensitively. */
+        private fun headerValue(head: ByteArray, name: String): String? {
+            val text = String(head, Charsets.ISO_8859_1)
+            // Skip the request line; only header lines can carry a value.
+            var start = text.indexOf("\r\n")
+            if (start < 0) return null
+            start += 2
+            while (start < text.length) {
+                var end = text.indexOf("\r\n", start)
+                if (end < 0) end = text.length
+                if (end == start) return null
+                val line = text.substring(start, end)
+                val colon = line.indexOf(':')
+                if (colon > 0 && line.substring(0, colon).trim().equals(name, ignoreCase = true)) {
+                    return line.substring(colon + 1).trim()
+                }
+                start = end + 2
+            }
+            return null
+        }
+
         private fun stripSessionHead(head: ByteArray): ByteArray {
             val text = String(head, Charsets.ISO_8859_1)
             if (!text.contains("\r\n")) return head
@@ -991,6 +1157,11 @@ SessionTracker.noteUsage(sessionId, found)
             // header map) so both merge one conversation onto one row.
             val headSessionId = java.util.concurrent.atomic.AtomicReference("")
             val headSessionName = java.util.concurrent.atomic.AtomicReference("")
+            // Counted down once the request has been attributed. t2 waits on
+            // it before it starts, so a fast response can never be tallied
+            // against a model that has not been sniffed yet (which is what
+            // made the host/model table read "unattributed").
+            val requestAttributed = java.util.concurrent.CountDownLatch(1)
             // Attaches everything the request revealed to its session row:
             // the client's own id (so one conversation merges onto one row),
             // its name (refreshing on every turn, which is what carries a
@@ -1047,21 +1218,49 @@ SessionTracker.noteUsage(sessionId, found)
                     if (reqTap.size() < reqTapCap) {
                         reqTap.write(sanitized, 0, sanitized.size.coerceAtMost(reqTapCap - reqTap.size()))
                     }
-                    // Body (and anything after the head) streams straight
-                    // through; the head has already been accounted for above.
-                    relayTap(cIn, uOut, upBytes, reqTap, reqTapCap)
-                    // Attribute the session as soon as the request is in the
-                    // tap, NOT after t1.join() below: t1 only returns when
-                    // the client closes the connection, which under
-                    // keep-alive can be the whole life of the tunnel. Waiting
-                    // that long left the row stuck on its bare UUID with no
-                    // model and no name for the entire session.
-                    attributeRequest(host)
+                    // Finish THIS request using its own framing, so the
+                    // session can be attributed below while the tunnel is
+                    // still open. Reading to EOF instead (the old
+                    // behaviour) meant attribution only ever happened when
+                    // the client hung up, which under keep-alive is the
+                    // whole life of the connection: the row sat unnamed
+                    // and the model was still unset when t2 tallied the
+                    // response, so usage was credited as "unattributed".
+                    val framed = when {
+                        isChunked(head) -> {
+                            relayChunkedBody(cIn, uOut, upBytes, reqTap, reqTapCap); true
+                        }
+                        else -> {
+                            val len = contentLengthOf(head)
+                            if (len < 0) false
+                            else { relayExactly(cIn, uOut, upBytes, reqTap, reqTapCap, len); true }
+                        }
+                    }
+                    if (framed) {
+                        attributeRequest(host)
+                        requestAttributed.countDown()
+                        // Anything past the framed body belongs to a later
+                        // request on the same connection; keep relaying it.
+                        relayTap(cIn, uOut, upBytes, reqTap, reqTapCap)
+                    } else {
+                        // No usable framing (or the peer went away before
+                        // the body finished): fall back to reading to EOF.
+                        relayTap(cIn, uOut, upBytes, reqTap, reqTapCap)
+                        attributeRequest(host)
+                        requestAttributed.countDown()
+                    }
                 } catch (_: Exception) {
                     // Peer went away mid-head; nothing left to forward.
                 }
             }
-            val t2 = Thread { relayTap(uIn, cOut, downBytes, tap, tapCap, liveUsage, host, requestId, upModel, false, currentSessionId.get()) }
+            val t2 = Thread {
+                // Bounded: in the normal case this returns immediately,
+                // because the request body is relayed long before the
+                // provider replies. The cap only matters if a client sends
+                // a head it never finishes.
+                try { requestAttributed.await(5, java.util.concurrent.TimeUnit.SECONDS) } catch (_: InterruptedException) {}
+                relayTap(uIn, cOut, downBytes, tap, tapCap, liveUsage, host, requestId, upModel, false, currentSessionId.get())
+            }
             t1.start(); t2.start()
             t1.join(); t2.join()
             // Verbose log: the decrypted response body (tap), stored once
@@ -1189,6 +1388,8 @@ SessionTracker.noteUsage(sessionId, found)
      * to the provider. Header names are matched case-insensitively;
      * everything else is copied through byte-for-byte.
      */
+
+
     private fun stripSessionHeaders(head: ByteArray): ByteArray = stripSessionHead(head)
 
     private fun relayTap(
