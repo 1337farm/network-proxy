@@ -35,6 +35,45 @@ class ProxyService : Service() {
     companion object {
         const val ACTION_STOP = "com.forgerig.gatekeeper.proxy.STOP"
         const val EXTRA_ONLY_IF_STOPPED = "onlyIfStopped"
+
+        /**
+         * Test shim for the private [stripSessionHeaders], so the head
+         * rewriter is covered by JVM unit tests (the MITM path itself
+         * needs a device).
+         */
+        @JvmStatic
+        fun stripSessionHeadersForTest(head: ByteArray): ByteArray = stripSessionHead(head)
+
+        /**
+         * Drops the proxy-internal session-correlation headers from a
+         * request head. The plain-HTTP branch does this before
+         * forwarding; the MITM branch has to do it too, because it relays
+         * the client's head upstream and would otherwise leak
+         * `x-session-id` / `x-session-name` to the provider. Header names
+         * are matched case-insensitively; every other byte is copied
+         * through, request line and CRLFCRLF included, so the head still
+         * parses upstream.
+         */
+        private fun stripSessionHead(head: ByteArray): ByteArray {
+            val text = String(head, Charsets.ISO_8859_1)
+            if (!text.contains("\r\n")) return head
+            val lines = text.split("\r\n")
+            val kept = ArrayList<String>(lines.size)
+            for ((i, line) in lines.withIndex()) {
+                if (i == 0) { kept.add(line); continue }
+                val c = line.indexOf(':')
+                if (c > 0) {
+                    val key = line.substring(0, c).trim()
+                    if (key.equals(SessionTracker.ID_HEADER_KEY, true) ||
+                        key.equals("x-session-name", true) ||
+                        key.equals("x-session-title", true)
+                    ) continue
+                }
+                kept.add(line)
+            }
+            return kept.joinToString("\r\n").toByteArray(Charsets.ISO_8859_1)
+        }
+
         private const val MAX_BODY_BYTES = 32 * 1024 * 1024L
         private const val POOL_SIZE = 32
         /** Health self-ping cadence + consecutive failures before self-restart. */
@@ -487,7 +526,6 @@ class ProxyService : Service() {
             // Re-key from UUID to hash of first user message (if available)
             if (provider != null && body != null) {
                 val hashId = SessionTracker.hashOf(SessionTracker.titleOf(body))
-                android.util.Log.d("ProxyService", "Plain rekey: sessionId=$sessionId, hashId=$hashId, title='${SessionTracker.titleOf(body)}'")
                 if (hashId.isNotEmpty() && hashId != sessionId) {
                     activeSessions.remove(sessionId)
                     SessionTracker.rekey(sessionId, hashId)
@@ -911,8 +949,33 @@ SessionTracker.noteUsage(sessionId, found)
             // truncate and fall back to provider/host display.
             val reqTap = java.io.ByteArrayOutputStream()
             val reqTapCap = 256 * 1024
-            val t1 = Thread { relayTap(cIn, uOut, upBytes, reqTap, reqTapCap, modelRef = upModel) }
-            val t2 = Thread { relayTap(uIn, cOut, downBytes, tap, tapCap, liveUsage, host, requestId, upModel, false, sessionId) }
+            // Correlation metadata harvested from the decrypted request
+            // head, before it is sanitized. The MITM path reads these off
+            // the tap (the plain-HTTP branch reads them off its parsed
+            // header map) so both merge one conversation onto one row.
+            val headSessionId = java.util.concurrent.atomic.AtomicReference("")
+            val headSessionName = java.util.concurrent.atomic.AtomicReference("")
+            val t1 = Thread {
+                val head = readRequestHead(cIn, 64 * 1024)
+                if (head == null) return@Thread
+                headSessionId.set(SessionTracker.sessionIdFromRequestHead(head))
+                headSessionName.set(SessionTracker.nameFromRequestHead(head))
+                val sanitized = stripSessionHeaders(head)
+                uOut.write(sanitized)
+                uOut.flush()
+                upBytes.addAndGet(sanitized.size.toLong())
+                if (reqTap.size() < reqTapCap) {
+                    reqTap.write(sanitized, 0, sanitized.size.coerceAtMost(reqTapCap - reqTap.size()))
+                }
+                if (upModel.get().isEmpty()) {
+                    val sniffed = ProxyMetrics.sniffModel(sanitized, sanitized.size)
+                    if (sniffed.isNotEmpty()) upModel.set(sniffed)
+                }
+                // Body (and anything after the head) streams straight
+                // through; the head has already been accounted for above.
+                relayTap(cIn, uOut, upBytes, reqTap, reqTapCap)
+            }
+            val t2 = Thread { relayTap(uIn, cOut, downBytes, tap, tapCap, liveUsage, host, requestId, upModel, false, currentSessionId) }
             t1.start(); t2.start()
             t1.join(); t2.join()
             // Verbose log: the decrypted response body (tap), stored once
@@ -926,7 +989,22 @@ SessionTracker.noteUsage(sessionId, found)
             // the client's session name off the tapped request head/body.
             val sniffed = upModel.get()
             val reqTitle = SessionTracker.titleOf(reqTap.toByteArray())
-            val reqName = SessionTracker.nameFromRequestHead(reqTap.toByteArray())
+            val headId = headSessionId.get()
+            val headName = headSessionName.get()
+            // The client's own id wins over the generated UUID: swap the
+            // slot so the finally block releases the id actually in use,
+            // exactly as the plain-HTTP branch does at :324.
+            if (headId.isNotEmpty() && headId != currentSessionId) {
+                activeSessions.remove(currentSessionId)
+                currentSessionId = headId
+                activeSessions.add(currentSessionId)
+            }
+            // A name on any turn refreshes the row (note() only sets it at
+            // registration); this is what carries a mid-session rename.
+            if (headName.isNotBlank()) {
+                SessionTracker.renameSession(currentSessionId, headName)
+            }
+            val reqName = if (headName.isNotBlank()) headName else SessionTracker.nameFromRequestHead(reqTap.toByteArray())
             if (sniffed.isNotBlank() || reqTitle.isNotBlank() || reqName.isNotBlank()) {
                 val st = ProviderBroker.store(this)
                 val mp = ProviderStore.matchHost(st, host)
@@ -935,15 +1013,13 @@ SessionTracker.noteUsage(sessionId, found)
                     title = reqTitle, name = reqName
                 )
                 // Re-key from UUID to hash of first user message (if available)
-                if (reqTitle.isNotBlank()) {
+                if (reqTitle.isNotBlank() && currentSessionId == sessionId) {
                     val hashId = SessionTracker.hashOf(reqTitle)
-                    android.util.Log.d("ProxyService", "MITM rekey: currentSessionId=$currentSessionId, hashId=$hashId, title='$reqTitle'")
                     if (hashId != currentSessionId) {
                         activeSessions.remove(currentSessionId)
                         SessionTracker.rekey(currentSessionId, hashId)
                         currentSessionId = hashId
                         activeSessions.add(currentSessionId)
-                        android.util.Log.d("ProxyService", "MITM rekey done, new currentSessionId=$currentSessionId")
                     }
                 }
             }
@@ -1056,6 +1132,38 @@ ProxyMetrics.recordUsage(host, upModel.get(), requestId, tail)
      *  request head for the top-level model id (first 4KB); downstream
      *  tallies read it back for per-model attribution. Pass sniff=false
      *  downstream so responses can never overwrite the request's model. */
+    /**
+     * Reads the request head (through the terminating CRLFCRLF) off the
+     * client stream and returns it verbatim. Byte-exact, because the head
+     * is re-emitted upstream by [stripSessionHeaders] and must otherwise
+     * survive untouched. Returns null only when the peer closed before
+     * sending anything; returns a short buffer when the cap is hit first.
+     */
+    private fun readRequestHead(input: java.io.InputStream, cap: Int): ByteArray? {
+        val buf = java.io.ByteArrayOutputStream()
+        val cr = '\r'.code
+        val lf = '\n'.code
+        var p1 = -1; var p2 = -1; var p3 = -1
+        while (true) {
+            val b = input.read()
+            if (b < 0) return if (buf.size() == 0) null else buf.toByteArray()
+            buf.write(b)
+            p3 = p2; p2 = p1; p1 = b
+            if (p1 == lf && p2 == cr && p3 == lf && b == cr) return buf.toByteArray()
+            if (buf.size() >= cap) return buf.toByteArray()
+        }
+    }
+
+    /**
+     * Drops the proxy-internal session-correlation headers from a request
+     * head. The plain-HTTP branch does this at :458 before forwarding; the
+     * MITM branch has to do it here, because it relays the client's head
+     * upstream and would otherwise leak `x-session-id` / `x-session-name`
+     * to the provider. Header names are matched case-insensitively;
+     * everything else is copied through byte-for-byte.
+     */
+    private fun stripSessionHeaders(head: ByteArray): ByteArray = stripSessionHead(head)
+
     private fun relayTap(
         input: java.io.InputStream,
         output: java.io.OutputStream,

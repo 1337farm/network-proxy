@@ -1,6 +1,8 @@
 package com.forgerig.gatekeeper.proxy
 
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -81,6 +83,69 @@ class SessionNamingTest {
         }
         // … and the top-level fallback when there is no metadata object.
         assertEquals("Top level", SessionTracker.nameOf(null, bytes("""{"session_name":"Top level"}""")))
+    }
+
+    @Test
+    fun sessionIdIsReadOffTheMitmRequestHead() {
+        // The MITM branch never parses headers into a map, so the id has to
+        // be recovered from the tapped bytes or every tunneled turn lands on
+        // its own row.
+        val raw = bytes(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: api.openai.com\r\n" +
+                "x-session-id: conv-42\r\ncontent-type: application/json\r\n\r\n" +
+                """{"model":"m"}"""
+        )
+        assertEquals("conv-42", SessionTracker.sessionIdFromRequestHead(raw))
+        // Case-insensitive, like every other header read in the proxy.
+        val upper = bytes("POST / HTTP/1.1\r\nX-Session-Id: conv-7\r\n\r\n")
+        assertEquals("conv-7", SessionTracker.sessionIdFromRequestHead(upper))
+        // Absent, blank, invalid and head-less all stay empty rather than
+        // inventing an id.
+        assertEquals("", SessionTracker.sessionIdFromRequestHead(null))
+        assertEquals("", SessionTracker.sessionIdFromRequestHead(ByteArray(0)))
+        assertEquals(
+            "",
+            SessionTracker.sessionIdFromRequestHead(bytes("POST / HTTP/1.1\r\nHost: h\r\n\r\n"))
+        )
+        assertEquals(
+            "",
+            SessionTracker.sessionIdFromRequestHead(bytes("POST / HTTP/1.1\r\nx-session-id:  \r\n\r\n"))
+        )
+        // A tap cut before CRLFCRLF has no parsable head.
+        assertEquals(
+            "",
+            SessionTracker.sessionIdFromRequestHead(bytes("POST /v1/chat HTTP/1.1\r\nx-session-id: c\r\n"))
+        )
+        // Body-only tap (no head at all) must not throw.
+        assertEquals("", SessionTracker.sessionIdFromRequestHead(bytes("""{"x-session-id":"c"}""")))
+    }
+
+    @Test
+    fun sessionHeadersAreStrippedFromTheForwardedHead() {
+        // The MITM branch re-emits the client's head upstream; without an
+        // explicit strip the provider would see proxy-internal metadata.
+        val out = ProxyService.stripSessionHeadersForTest(
+            bytes(
+                "POST /v1/messages HTTP/1.1\r\nHost: h\r\n" +
+                    "x-session-id: conv-1\r\n" +
+                    "X-Session-Name: Oc proxy\r\n" +
+                    "x-session-title: alias\r\n" +
+                    "authorization: Bearer real\r\n\r\n"
+            )
+        )
+        val text = String(out, Charsets.ISO_8859_1)
+        assertFalse(text.contains("x-session-id", ignoreCase = true))
+        assertFalse(text.contains("x-session-name", ignoreCase = true))
+        assertFalse(text.contains("x-session-title", ignoreCase = true))
+        // Everything else survives untouched, request line and terminator
+        // included, so the request still parses upstream.
+        assertTrue(text.startsWith("POST /v1/messages HTTP/1.1"))
+        assertTrue(text.contains("Host: h"))
+        assertTrue(text.contains("authorization: Bearer real"))
+        assertTrue(text.endsWith("\r\n\r\n"))
+        // A head with nothing to strip comes back unchanged.
+        val plain = bytes("POST / HTTP/1.1\r\nHost: h\r\n\r\n")
+        assertArrayEquals(plain, ProxyService.stripSessionHeadersForTest(plain))
     }
 
     @Test

@@ -209,8 +209,29 @@ object SessionTracker {
      */
     fun nameFromRequestHead(tap: ByteArray?): String {
         if (tap == null || tap.isEmpty()) return ""
+        if (indexOfHeaderEnd(tap) < 0) return nameOf(null, tap)
+        return nameOf(headMap(tap), tap)
+    }
+
+    /**
+     * [sessionIdOf] for a raw tapped request: the MITM path only holds the
+     * tap bytes, and needs the same id contract as the plain-HTTP path so
+     * both merge every turn of one conversation onto one session row.
+     */
+    fun sessionIdFromRequestHead(tap: ByteArray?): String {
+        if (tap == null || tap.isEmpty()) return ""
+        if (indexOfHeaderEnd(tap) < 0) return ""
+        return sessionIdOf(headMap(tap))
+    }
+
+    /**
+     * Header map of a tapped request, keys lowercased, first value wins
+     * (mirrors what the plain-HTTP parser sees). null when the tap holds no
+     * complete head.
+     */
+    fun headMap(tap: ByteArray): Map<String, String>? {
         val headEnd = indexOfHeaderEnd(tap)
-        if (headEnd < 0) return nameOf(null, tap)
+        if (headEnd < 0) return null
         val head = String(tap, 0, headEnd, Charsets.ISO_8859_1)
         val headers = HashMap<String, String>()
         head.lineSequence().drop(1).forEach { line ->
@@ -220,7 +241,7 @@ object SessionTracker {
             val v = line.substring(i + 1).trim()
             if (k.isNotEmpty() && v.isNotEmpty()) headers.putIfAbsent(k, v)
         }
-        return nameOf(headers, tap)
+        return headers
     }
 
     /**
@@ -374,16 +395,9 @@ object SessionTracker {
 
     @Synchronized
     fun rekey(oldId: String, newId: String) {
-        if (oldId == newId || oldId.isEmpty() || newId.isEmpty()) {
-            android.util.Log.d("SessionTracker", "rekey: no-op (oldId=$oldId, newId=$newId)")
-            return
-        }
-        android.util.Log.d("SessionTracker", "rekey: $oldId -> $newId")
+        if (oldId == newId || oldId.isEmpty() || newId.isEmpty()) return
         val prev = sessions.remove(oldId)
-        if (prev == null) {
-            android.util.Log.w("SessionTracker", "rekey: oldId not found: $oldId")
-            return
-        }
+        if (prev == null) return
         val existing = sessions[newId]
         sessions[newId] = if (existing != null) {
             prev.copy(
@@ -402,18 +416,13 @@ object SessionTracker {
     }
 
     fun hashOf(text: String): String {
-        if (text.isEmpty()) {
-            android.util.Log.d("SessionTracker", "hashOf: empty text, returning empty")
-            return ""
-        }
+        if (text.isEmpty()) return ""
         var h = -3750763034362895579L
         for (c in text) {
             h = h xor c.code.toLong()
             h *= 1099511628211L
         }
-        val result = h.toString(16)
-        android.util.Log.d("SessionTracker", "hashOf: '$text' -> $result")
-        return result
+        return h.toString(16)
     }
 
     /** Stamp a routing event (429, rollover, spill) onto a live session. */
