@@ -484,6 +484,18 @@ class ProxyService : Service() {
             // later turn; note() only sets it at registration, so refresh
             // it here (no-op for an unknown session).
             SessionTracker.renameSession(sessionId, SessionTracker.nameOf(headers, body))
+            // Re-key from UUID to hash of first user message (if available)
+            if (provider != null && body != null) {
+                val hashId = SessionTracker.hashOf(SessionTracker.titleOf(body))
+                android.util.Log.d("ProxyService", "Plain rekey: sessionId=$sessionId, hashId=$hashId, title='${SessionTracker.titleOf(body)}'")
+                if (hashId.isNotEmpty() && hashId != sessionId) {
+                    activeSessions.remove(sessionId)
+                    SessionTracker.rekey(sessionId, hashId)
+                    sessionId = hashId
+                    activeSessions.add(sessionId)
+                    android.util.Log.d("ProxyService", "Plain rekey done, new sessionId=$sessionId")
+                }
+            }
             var finalCode = -1
             var transferredTotal = 0L
             var keyRounds = 0
@@ -646,7 +658,7 @@ class ProxyService : Service() {
                                     // together (see recordUsage). Model is the
                                     // upstream id actually requested.
 ProxyMetrics.recordUsage(host, modelOf(body), requestId, found)
-                                     SessionTracker.noteUsage(sessionId, found)
+SessionTracker.noteUsage(sessionId, found)
                                      ProxyMetrics.event(
                                          "Tokens $host in=${found[0]} out=${found[1]} " +
                                              "cacheR=${found[2]} cacheW=${found[3]}"
@@ -839,6 +851,7 @@ ProxyMetrics.recordUsage(host, modelOf(body), requestId, found)
         requestId: String,
         startedAt: Long
     ): Boolean {
+        var currentSessionId = sessionId
         val serverCtx = try {
             MitmCa.serverContext(this, host.lowercase())
         } catch (_: Exception) { null } ?: return false
@@ -918,9 +931,21 @@ ProxyMetrics.recordUsage(host, modelOf(body), requestId, found)
                 val st = ProviderBroker.store(this)
                 val mp = ProviderStore.matchHost(st, host)
                 SessionTracker.note(
-                    sessionId, mp?.id ?: "", "(client key)", sniffed, host.lowercase(),
+                    currentSessionId, mp?.id ?: "", "(client key)", sniffed, host.lowercase(),
                     title = reqTitle, name = reqName
                 )
+                // Re-key from UUID to hash of first user message (if available)
+                if (reqTitle.isNotBlank()) {
+                    val hashId = SessionTracker.hashOf(reqTitle)
+                    android.util.Log.d("ProxyService", "MITM rekey: currentSessionId=$currentSessionId, hashId=$hashId, title='$reqTitle'")
+                    if (hashId != currentSessionId) {
+                        activeSessions.remove(currentSessionId)
+                        SessionTracker.rekey(currentSessionId, hashId)
+                        currentSessionId = hashId
+                        activeSessions.add(currentSessionId)
+                        android.util.Log.d("ProxyService", "MITM rekey done, new currentSessionId=$currentSessionId")
+                    }
+                }
             }
             // NOTE: bytesOut is fed per-chunk inside relay()/relayTap();
             // adding the lump sum here would double-count tunneled bytes.

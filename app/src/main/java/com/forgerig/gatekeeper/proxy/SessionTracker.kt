@@ -140,7 +140,7 @@ object SessionTracker {
          *
          * Never blank.
          */
-        val displayName: String get() = resolveName(clientName, remoteId, keyLabel, host)
+        val displayName: String get() = resolveName(clientName, remoteId, keyLabel, host, sessionId)
 
         /**
          * Short one-line description of what the session is: the
@@ -170,9 +170,10 @@ object SessionTracker {
      * sessions (which is what it used to show) and the bare host for
      * tunnels. Blank anywhere in rung 3 falls back to the key label alone.
      */
-    fun resolveName(clientName: String, remoteId: String, keyLabel: String, host: String = ""): String {
+    fun resolveName(clientName: String, remoteId: String, keyLabel: String, host: String = "", sessionId: String = ""): String {
         if (clientName.isNotBlank()) return clientName
         if (remoteId.isNotBlank()) return remoteId
+        if (sessionId.isNotBlank()) return sessionId
         val key = keyLabel.ifBlank { "(client key)" }
         return if (host.isNotBlank()) "$key @ $host" else key
     }
@@ -369,6 +370,50 @@ object SessionTracker {
             nameSource = "header",
             touchedMs = System.currentTimeMillis()
         )
+    }
+
+    @Synchronized
+    fun rekey(oldId: String, newId: String) {
+        if (oldId == newId || oldId.isEmpty() || newId.isEmpty()) {
+            android.util.Log.d("SessionTracker", "rekey: no-op (oldId=$oldId, newId=$newId)")
+            return
+        }
+        android.util.Log.d("SessionTracker", "rekey: $oldId -> $newId")
+        val prev = sessions.remove(oldId)
+        if (prev == null) {
+            android.util.Log.w("SessionTracker", "rekey: oldId not found: $oldId")
+            return
+        }
+        val existing = sessions[newId]
+        sessions[newId] = if (existing != null) {
+            prev.copy(
+                sessionId = newId,
+                inputTokens = prev.inputTokens + existing.inputTokens,
+                outputTokens = prev.outputTokens + existing.outputTokens,
+                cacheReadTokens = prev.cacheReadTokens + existing.cacheReadTokens,
+                cacheWriteTokens = prev.cacheWriteTokens + existing.cacheWriteTokens,
+                touchedMs = System.currentTimeMillis()
+            )
+        } else {
+            prev.copy(sessionId = newId, touchedMs = System.currentTimeMillis())
+        }
+        evictOverflow()
+        android.util.Log.d("SessionTracker", "rekey: done, new sessionId=${sessions[newId]?.sessionId}")
+    }
+
+    fun hashOf(text: String): String {
+        if (text.isEmpty()) {
+            android.util.Log.d("SessionTracker", "hashOf: empty text, returning empty")
+            return ""
+        }
+        var h = -3750763034362895579L
+        for (c in text) {
+            h = h xor c.code.toLong()
+            h *= 1099511628211L
+        }
+        val result = h.toString(16)
+        android.util.Log.d("SessionTracker", "hashOf: '$text' -> $result")
+        return result
     }
 
     /** Stamp a routing event (429, rollover, spill) onto a live session. */
