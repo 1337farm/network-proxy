@@ -15,6 +15,11 @@ android {
         versionCode = run {
                 try {
                     val proc = ProcessBuilder("git", "rev-list", "--count", "HEAD")
+                        // Pin the CWD: an inherited one may not be the repo
+                        // (a reused Gradle daemon runs wherever it started),
+                        // and a bare `git` there fails, silently downgrading
+                        // every local build to versionCode 1.
+                        .directory(project.rootProject.projectDir)
                         .redirectErrorStream(true)
                         .start()
                     val count = proc.inputStream.bufferedReader().readText().trim().toIntOrNull()
@@ -29,6 +34,7 @@ android {
             ?: run {
                 try {
                     val proc = ProcessBuilder("git", "rev-parse", "--short=8", "HEAD")
+                        .directory(project.rootProject.projectDir)
                         .redirectErrorStream(true)
                         .start()
                     val sha = proc.inputStream.bufferedReader().readText().trim()
