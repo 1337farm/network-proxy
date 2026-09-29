@@ -412,7 +412,6 @@ object SessionTracker {
             prev.copy(sessionId = newId, touchedMs = System.currentTimeMillis())
         }
         evictOverflow()
-        android.util.Log.d("SessionTracker", "rekey: done, new sessionId=${sessions[newId]?.sessionId}")
     }
 
     fun hashOf(text: String): String {
