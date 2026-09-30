@@ -143,10 +143,45 @@ class SessionNamingTest {
         val moved = ProxyService.relayChunkedForTest(
             java.io.ByteArrayInputStream(wire), out, counter, null, 1 shl 20
         )
-        // Payload plus the CRLF after each chunk; the size lines are framing
-        // and must NOT be sent to the provider.
-        assertEquals("hello\r\n world\r\n".length.toLong(), moved)
-        assertEquals("hello\r\n world\r\n", String(out.toByteArray(), Charsets.ISO_8859_1))
+        // Upstream received the ORIGINAL chunked head, so the whole body must
+        // be forwarded byte-for-byte, framing included. Dropping a size line or
+        // the terminating 0-line would leave the provider reading a malformed
+        // chunked stream.
+        assertEquals(wire.size.toLong(), moved)
+        assertEquals(
+            "5\r\nhello\r\n6;ext=1\r\n world\r\n0\r\n\r\n",
+            String(out.toByteArray(), Charsets.ISO_8859_1)
+        )
+        assertEquals(wire.size.toLong(), counter.get())
+    }
+
+    @Test
+    fun chunkedBodyWithATrailerIsForwardedAndStopsBeforeTheNextRequest() {
+        // A keep-alive connection carries more than one request. The relay
+        // must stop at the blank line that ends the trailer section and must
+        // NOT consume a single byte of the request that follows, or the next
+        // request upstream starts mid-line and fails to parse.
+        val wire = bytes(
+            "4\r\nabcd\r\n" +
+            "0\r\n" +
+            "X-Checksum: deadbeef\r\n" +
+            "\r\n" +
+            "POST /v1/messages HTTP/1.1\r\nHost: openrouter.ai\r\n\r\n"
+        )
+        val out = java.io.ByteArrayOutputStream()
+        val counter = java.util.concurrent.atomic.AtomicLong()
+        val input = java.io.ByteArrayInputStream(wire)
+        val moved = ProxyService.relayChunkedForTest(
+            input, out, counter, null, 1 shl 20
+        )
+        val expectedBody = "4\r\nabcd\r\n0\r\nX-Checksum: deadbeef\r\n\r\n"
+        assertEquals(expectedBody.length.toLong(), moved)
+        assertEquals(expectedBody, String(out.toByteArray(), Charsets.ISO_8859_1))
+        // The next request is still fully readable by the caller.
+        val rest = ByteArray(64)
+        val n = input.read(rest)
+        assertEquals("POST /v1/messages HTTP/1.1\r\nHost: openrouter.ai\r\n\r\n",
+            String(rest, 0, n, Charsets.ISO_8859_1))
     }
 
     @Test

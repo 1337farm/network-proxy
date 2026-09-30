@@ -1057,7 +1057,16 @@ object ProxyMetrics {
         val anthIn = tokNum("input_tokens", body)
         val anthOut = tokNum("output_tokens", body)
         val cacheRead = tokNum("cache_read_input_tokens", body)
-        val cacheWrite = tokNum("cache_creation_input_tokens", body)
+        // Anthropic reports writes as cache_creation_input_tokens; the
+        // OpenAI-compatible gateways most clients actually talk to report
+        // them as prompt_tokens_details.cache_write_tokens. Without the
+        // second spelling the cacheW column is structurally always 0.
+        // These are two names for ONE number, not two components, so take
+        // the larger: a gateway that echoed both must not be counted twice.
+        val cacheWrite = maxOf(
+            tokNum("cache_creation_input_tokens", body),
+            tokNum("cache_write_tokens", body)
+        )
         val oaiIn = tokNum("prompt_tokens", body)
         val oaiOut = tokNum("completion_tokens", body)
         // prompt_tokens INCLUDES cached tokens on OpenAI; keep raw sums.
@@ -1185,6 +1194,7 @@ object ProxyMetrics {
         private val patterns = listOf(
             "input_tokens", "output_tokens",
             "cache_read_input_tokens", "cache_creation_input_tokens",
+            "cache_write_tokens",
             "prompt_tokens", "completion_tokens", "cached_tokens"
         ).map { key -> key to Regex(""""$key"\s*:\s*(\d+)(?!\d)""") }
         private val keyValue = Regex(""""(\w+)"\s*:\s*(\d+)$""")
@@ -1315,7 +1325,7 @@ object ProxyMetrics {
                 "input_tokens", "prompt_tokens" -> 0
                 "output_tokens", "completion_tokens" -> 1
                 "cache_read_input_tokens", "cached_tokens" -> 2
-                "cache_creation_input_tokens" -> 3
+                "cache_creation_input_tokens", "cache_write_tokens" -> 3
                 else -> return
             }
             if (slot == SLOT_OUTPUT) {
@@ -1333,6 +1343,9 @@ object ProxyMetrics {
             // credits 0, and a CHANGED value is the automatic new-response
             // signal, so a growing input_tokens (100 then 350) sums to 450
             // rather than being diffed down to 250.
+            // The two cacheW spellings need no extra guard here: a gateway
+            // echoing both reports the SAME number twice, which the
+            // identical-repeat rule above already credits once.
             if (oneShotCredited[slot] && value == oneShotValue[slot]) return
             oneShotCredited[slot] = true
             oneShotValue[slot] = value

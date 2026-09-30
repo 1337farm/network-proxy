@@ -168,52 +168,94 @@ class ProxyService : Service() {
             fun emit(bytes: ByteArray, n: Int) {
                 if (n <= 0) return
                 output.write(bytes, 0, n)
+                output.flush()
                 counter.addAndGet(n.toLong())
                 moved += n
                 if (tap != null && tap.size() < tapCap) {
                     tap.write(bytes, 0, n.coerceAtMost(tapCap - tap.size()))
                 }
             }
+            // Forward the chunked body byte-for-byte. The upstream connection
+            // was handed the ORIGINAL head, which still says
+            // `Transfer-Encoding: chunked`, so every framing byte (the size
+            // line, the CRLF that closes each chunk, the terminating 0-line
+            // and any trailer) MUST reach the provider or it sees a malformed
+            // stream. We parse only to know where the body ends so the request
+            // can be finished and attributed without waiting for close.
             while (true) {
+                // Read one line verbatim, preserving its exact terminator.
                 line.reset()
-                // Chunk size line, terminated by CRLF (an LF-only line is
-                // tolerated; providers do send it).
-                var prev = -1
                 while (true) {
                     val b = input.read()
-                    if (b < 0) return moved
+                    if (b < 0) {
+                        // Truncated stream: forward whatever the line had.
+                        if (line.size() > 0) emit(line.toByteArray(), line.size())
+                        return moved
+                    }
                     if (b == '\n'.code) {
-                        if (prev == '\r'.code) line.write('\r'.code)
+                        line.write(b)
                         break
                     }
                     line.write(b)
-                    prev = b
-                    if (line.size() > 64) return moved
-                }
-                val sizeText = String(line.toByteArray(), Charsets.ISO_8859_1)
-                    .substringBefore(';').trim()
-                val size = sizeText.toLongOrNull(16) ?: return moved
-                if (size <= 0L) {
-                    // Terminating chunk: swallow the trailer up to the blank line.
-                    var tprev = -1
-                    while (true) {
-                        val b = input.read()
-                        if (b < 0) return moved
-                        if (b == '\n'.code && tprev == '\r'.code) break
-                        tprev = b
+                    if (line.size() > 64) {
+                        // Pathological size line; forward it and bail rather
+                        // than buffer without bound.
+                        emit(line.toByteArray(), line.size())
+                        return moved
                     }
-                    return moved
                 }
-                moved += relayExactly(input, output, counter, tap, tapCap, size)
-                // The CRLF that closes the chunk is framing, not payload, but it
-                // still has to reach the provider verbatim.
+                val sizeLine = String(line.toByteArray(), Charsets.ISO_8859_1)
+                val size = sizeLine.trimEnd('\r', '\n')
+                    .substringBefore(';').trim().toLongOrNull(16) ?: -1L
+                // Forward the size line exactly as received.
+                emit(line.toByteArray(), line.size())
+                if (size <= 0L) {
+                    // Terminating chunk: the 0-line is already forwarded; copy
+                    // the trailer section verbatim. The trailer ends at the
+                    // first blank line; read whole lines so a real trailer
+                    // never over-reads into a following keep-alive request.
+                    while (true) {
+                        line.reset()
+                        var lineLen = 0
+                        while (true) {
+                            val tb = input.read()
+                            if (tb < 0) {
+                                if (lineLen > 0) emit(line.toByteArray(), lineLen)
+                                return moved
+                            }
+                            line.write(tb)
+                            lineLen++
+                            if (tb == '\n'.code) break
+                        }
+                        emit(line.toByteArray(), lineLen)
+                        // A line that is just CRLF (or LF) is the blank line
+                        // that terminates the trailer section.
+                        if (lineLen <= 2 && String(line.toByteArray(), Charsets.ISO_8859_1).trim().isEmpty()) {
+                            return moved
+                        }
+                    }
+                }
+                // Copy the payload exactly.
+                var remain = size
+                while (remain > 0) {
+                    val want = minOf(16 * 1024L, remain).toInt()
+                    val buf = ByteArray(want)
+                    var got = 0
+                    while (got < want) {
+                        val n = input.read(buf, got, want - got)
+                        if (n < 0) return moved
+                        got += n
+                    }
+                    emit(buf, got)
+                    remain -= got
+                }
+                // Copy the CRLF that closes this chunk.
                 val cr = input.read()
                 if (cr < 0) return moved
+                emit(byteArrayOf(cr.toByte()), 1)
                 val lf = input.read()
                 if (lf < 0) return moved
-                val term = ByteArray(2)
-                term[0] = cr.toByte(); term[1] = lf.toByte()
-                emit(term, 2)
+                emit(byteArrayOf(lf.toByte()), 1)
             }
         }
 

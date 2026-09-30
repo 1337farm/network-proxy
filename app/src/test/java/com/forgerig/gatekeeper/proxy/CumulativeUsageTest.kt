@@ -488,6 +488,70 @@ class CumulativeUsageTest {
     }
 
     @Test
+    fun openRouterStyleCacheWriteKeyIsCreditedToTheCacheWriteSlot() {
+        // OpenRouter (and the OpenAI-compatible gateways most clients talk
+        // to) report cache WRITES as prompt_tokens_details.cache_write_tokens.
+        // That spelling was missing from the scanner's key list entirely, so
+        // the cacheW column was structurally always 0 for exactly the
+        // providers this proxy mostly sees. OpenAI itself has no cache-write
+        // field, which is why the zero looked "correct" and hid the gap.
+        ProxyMetrics.resetTallies()
+        val id = "openrouter-cache-write"
+        newTunnel(id)
+        val frame = "data: {\"id\":\"c1\",\"model\":\"openrouter/free\",\"usage\":{" +
+            "\"prompt_tokens\":12000,\"completion_tokens\":40," +
+            "\"prompt_tokens_details\":{\"cached_tokens\":9000," +
+            "\"cache_write_tokens\":3000}}}\n\n"
+        val total = drive(id, frame)
+        assertEquals("9000 read", 9000L, total[2])
+        assertEquals("3000 written, not 0", 3000L, total[3])
+        assertEquals(3000L, ProxyMetrics.cacheWriteTokens)
+    }
+
+    @Test
+    fun aGatewayEchoingBothCacheWriteSpellingsIsNotDoubleCounted() {
+        // The two write keys name ONE quantity. A gateway that relays
+        // upstream Anthropic usage AND normalizes it to OpenAI shape would
+        // emit both. The scanner credits an identical repeat once, so the
+        // duplicate lands as a re-send rather than a second response.
+        ProxyMetrics.resetTallies()
+        val id = "both-write-spellings"
+        newTunnel(id)
+        val frame = "data: {\"usage\":{\"prompt_tokens\":100," +
+            "\"prompt_tokens_details\":{\"cache_write_tokens\":1500}," +
+            "\"cache_creation_input_tokens\":1500}}\n\n"
+        val total = drive(id, frame)
+        assertEquals("one write, counted once", 1500L, total[3])
+        assertEquals(1500L, ProxyMetrics.cacheWriteTokens)
+    }
+
+    @Test
+    fun nonStreamingScanTakesTheLargerWriteSpellingInsteadOfSummingThem() {
+        // scanUsage reads the whole body at once, so unlike the streaming
+        // scanner it has no re-send rule to lean on: the two spellings must
+        // be reconciled here. Summing them would report 1500 + 9000 = 10500
+        // writes for a single 9000-token write.
+        val anth = ProxyMetrics.scanUsage(
+            """{"usage":{"input_tokens":10,"cache_creation_input_tokens":9000}}"""
+        )
+        assertEquals(9000L, anth[3])
+        val oai = ProxyMetrics.scanUsage(
+            """{"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cache_write_tokens":9000}}}"""
+        )
+        assertEquals(9000L, oai[3])
+        val both = ProxyMetrics.scanUsage(
+            """{"usage":{"cache_creation_input_tokens":9000,""" +
+                """"prompt_tokens_details":{"cache_write_tokens":9000}}}"""
+        )
+        assertEquals("same number twice is still 9000", 9000L, both[3])
+        val disagreeing = ProxyMetrics.scanUsage(
+            """{"usage":{"cache_creation_input_tokens":10,""" +
+                """"prompt_tokens_details":{"cache_write_tokens":40}}}"""
+        )
+        assertEquals("aliases cannot disagree into a double count", 40L, disagreeing[3])
+    }
+
+    @Test
     fun oneShotCacheFieldsAreSummedAcrossKeepAliveResponsesAndReachTheTallyOnly() {
         // Cache read/write are one-shot per response exactly like input, so a
         // second response with a LARGER cache_read must be credited in full
