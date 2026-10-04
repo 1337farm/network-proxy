@@ -12,38 +12,63 @@ android {
         applicationId = "com.forgerig.gatekeeper.proxy"
         minSdk = 26
         targetSdk = 35
+        // Run one git command against the build's own checkout, returning
+        // trimmed stdout or null. The CWD is pinned because a reused Gradle
+        // daemon starts wherever it happened to start, and a bare `git`
+        // there fails instead of describing this checkout.
+        fun git(vararg args: String): String? = try {
+            val proc = ProcessBuilder(*args)
+                .directory(project.rootProject.projectDir)
+                .redirectErrorStream(true)
+                .start()
+            val out = proc.inputStream.bufferedReader().readText().trim()
+            proc.waitFor()
+            out.ifEmpty { null }
+        } catch (_: Exception) {
+            null
+        }
+
+        // versionCode MUST be monotonic across builds, or `adb install -r`
+        // rejects the next one as INSTALL_FAILED_VERSION_DOWNGRADE, and
+        // there is no way past it: --allow-downgrade is refused for a
+        // release APK.
+        //
+        // Commit COUNT is not monotonic here. A squash-merge collapses the
+        // branch's commits into one, so the count on main lands BELOW the
+        // count CI built the PR at -- GitHub checks out an ephemeral
+        // test-merge ref for `pull_request`, which adds one more. main's
+        // post-merge artifact then refuses to install over the PR build
+        // already on the device. That is not hypothetical: it blocked the
+        // sideload twice by hand, 66001 vs 67001.
+        //
+        // The commit's own timestamp IS monotonic. The squash commit is
+        // created at merge time, strictly later than the branch commits it
+        // squashes, so main's rebuild always outranks the PR build it
+        // supersedes. Dividing by 10 keeps it far below the 2100000000
+        // ceiling, and CI and a local build read the same checkout, so both
+        // produce the same number with nothing to remember.
         versionCode = run {
-                try {
-                    val proc = ProcessBuilder("git", "rev-list", "--count", "HEAD")
-                        // Pin the CWD: an inherited one may not be the repo
-                        // (a reused Gradle daemon runs wherever it started),
-                        // and a bare `git` there fails, silently downgrading
-                        // every local build to versionCode 1.
-                        .directory(project.rootProject.projectDir)
-                        .redirectErrorStream(true)
-                        .start()
-                    val count = proc.inputStream.bufferedReader().readText().trim().toIntOrNull()
-                    proc.waitFor()
-                    if (count != null && count > 0) count * 1_000 + 1
-                    else 1
-                } catch (_: Exception) { 1 }
+            val ts = git("git", "show", "-s", "--format=%ct", "HEAD")?.toLongOrNull()
+            if (ts != null && ts > 0) {
+                (ts / 10).toInt()
+            } else {
+                // No usable timestamp (git missing, or a checkout too
+                // shallow to resolve the commit). Degrade to the old count
+                // scheme rather than to 1, so a degraded build is never
+                // itself a downgrade of a normal one.
+                val count = git("git", "rev-list", "--count", "HEAD")?.toIntOrNull()
+                if (count != null && count > 0) count * 1_000 + 1 else 1
             }
-        // Version name = short git SHA (CI: GITHUB_SHA, local: git rev-parse).
-        // Included in APK filename automatically by the Android plugin.
-        versionName = System.getenv("GITHUB_SHA")?.take(8)
-            ?: run {
-                try {
-                    val proc = ProcessBuilder("git", "rev-parse", "--short=8", "HEAD")
-                        .directory(project.rootProject.projectDir)
-                        .redirectErrorStream(true)
-                        .start()
-                    val sha = proc.inputStream.bufferedReader().readText().trim()
-                    proc.waitFor()
-                    if (sha.matches(Regex("[0-9a-f]{8}"))) sha else "dev"
-                } catch (_: Exception) {
-                    "dev"
-                }
-            }
+        }
+
+        // Version name = short SHA of the commit actually built, read from
+        // the checkout rather than from GITHUB_SHA so a CI artifact and a
+        // local build of the same commit are provably identical. Included
+        // in the APK filename automatically by the Android plugin.
+        versionName = run {
+            val sha = git("git", "rev-parse", "--short=8", "HEAD")
+            if (sha != null && sha.matches(Regex("[0-9a-f]{8}"))) sha else "dev"
+        }
     }
 
     signingConfigs {
