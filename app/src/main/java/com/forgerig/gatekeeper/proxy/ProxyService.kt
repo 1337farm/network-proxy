@@ -735,36 +735,47 @@ class ProxyService : Service() {
                 } catch (_: Exception) { /* not JSON — passthrough */ }
             }
 
-            // Front-door requests that named no configured route still have to
-            // go somewhere: targetUrl is still the gateway.invalid
-            // placeholder. Send them to a provider that actually has a usable
-            // key and let the upstream judge whether it knows the model --
-            // a client calling us as its provider should not have to know our
-            // routing table to get an answer.
+            // Front door: the client named no route we know, so targetUrl is
+            // still the gateway.invalid placeholder. Decide where it goes in
+            // GatewayPlanner (pure, unit-tested) rather than here, where it
+            // needs a Context and a socket to reach.
             if (gatewayMode && routeLeg == null) {
-                val fallback = routeStore.defaultProvider()
-                if (fallback == null) {
-                    val msg = "No provider configured. Add one before calling the proxy as your provider."
-                    val bb = msg.toByteArray()
-                    ProxyMetrics.eventWarning("Gateway request with no usable provider")
-                    output.write(
-                        ("HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n" +
-                            "Content-Length: ${bb.size}\r\nConnection: close\r\n\r\n").toByteArray()
-                    )
-                    output.write(bb)
-                    output.flush()
-                    if (metricsEnabled) ProxyMetrics.recordRequestEnd(
-                        sessionId, requestId, 503, bb.size.toLong(), NetworkScenario.PERMANENT_FAILURE
-                    )
-                    return
+                when (val plan = GatewayPlanner.plan(routeStore, body, targetUrl)) {
+                    is GatewayPlanner.Plan.Reject -> {
+                        val bb = plan.message.toByteArray()
+                        ProxyMetrics.eventWarning("Gateway request with no usable provider")
+                        output.write(
+                            ("HTTP/1.1 ${plan.status} Service Unavailable\r\nContent-Type: text/plain\r\n" +
+                                "Content-Length: ${bb.size}\r\nConnection: close\r\n\r\n").toByteArray()
+                        )
+                        output.write(bb)
+                        output.flush()
+                        if (metricsEnabled) ProxyMetrics.recordRequestEnd(
+                            sessionId, requestId, plan.status, bb.size.toLong(),
+                            NetworkScenario.PERMANENT_FAILURE
+                        )
+                        return
+                    }
+                    is GatewayPlanner.Plan.Forward -> {
+                        targetUrl = plan.targetUrl
+                        if (plan.body != null && !plan.body.contentEquals(body ?: ByteArray(0))) {
+                            body = plan.body
+                            headers.keys.filter {
+                                it.equals("Content-Length", true)
+                            }.forEach { headers.remove(it) }
+                            headers["Content-Length"] = body!!.size.toString()
+                        }
+                        if (plan.routeLabel != null) {
+                            ProxyMetrics.event("Route matched → ${plan.routeLabel}")
+                        } else {
+                            ProxyMetrics.event("Gateway fallback → ${java.net.URL(plan.targetUrl).host}")
+                        }
+                        // Key injection is deliberately left to the existing
+                        // ProviderStore.matchProvider path below, which
+                        // resolves the provider from the rewritten host and
+                        // strips whatever credential the client sent.
+                    }
                 }
-                // Retarget only. Key injection is left to the existing
-                // ProviderStore.matchProvider path below, which resolves the
-                // provider from the now-rewritten host and strips whatever
-                // credential the client sent. Duplicating that here would be
-                // a second place for auth to go wrong.
-                targetUrl = ProviderStore.retarget(targetUrl, fallback.first.baseUrl, preferLegScheme = true)
-                ProxyMetrics.event("Gateway fallback → ${fallback.first.id}")
             }
 
             val reqHeaders = headers.toHeaders()
