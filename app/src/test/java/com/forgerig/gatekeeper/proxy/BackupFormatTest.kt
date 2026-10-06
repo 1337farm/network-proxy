@@ -197,91 +197,42 @@ class RateChartPanTest {
     }
 }
 
+/** The one address a loopback-only listener can be reached on. */
+private const val ADDR = "127.0.0.1"
+
 class NotificationTextTest {
     @Test
     fun collapsedRowIsTheStatusLine() {
-        val b = NotificationText.running(listOf("100.81.194.26", "192.168.68.126"), 3128, 91.8, "1h 04m")
+        val b = NotificationText.running(ADDR, 3128, 91.8, "1h 04m")
         // Collapsed = setContentText: uptime + rate only, no addresses.
         assertEquals("up 1h 04m · 92 tok/s", b.collapsed)
         // Expanded = the same status line first, then one address per line.
         assertEquals(
-            "up 1h 04m · 92 tok/s\n100.81.194.26:3128\n192.168.68.126:3128",
+            "up 1h 04m · 92 tok/s\nlistening on 127.0.0.1:3128",
             b.expanded
         )
     }
 
     @Test
     fun idleRateStillRenders() {
-        val b = NotificationText.running(listOf("192.168.1.5"), 3128, 0.0, "12s")
+        val b = NotificationText.running(ADDR, 3128, 0.0, "12s")
         assertEquals("up 12s · 0.0 tok/s", b.collapsed)
     }
 
     @Test
     fun noUptimeDegradesToRateOnly() {
-        val b = NotificationText.running(listOf("192.168.1.5"), 3128, 5.0, null)
+        val b = NotificationText.running(ADDR, 3128, 5.0, null)
         assertEquals("5.0 tok/s", b.collapsed)
         assertFalse(b.expanded.contains("up "))
         assertFalse(b.expanded.contains("\n\n"))
     }
 
     @Test
-    fun noAddressesFallsBackToTheBindAddress() {
-        val b = NotificationText.running(emptyList(), 8080, 3.0, "5s")
+    fun anyPortRendersTheBindAddressLine() {
+        val b = NotificationText.running(ADDR, 8080, 3.0, "5s")
         // Collapsed stays status-only; the bind address keeps the port
         // discoverable in the expanded body.
         assertEquals("up 5s · 3.0 tok/s", b.collapsed)
-        assertEquals("up 5s · 3.0 tok/s\nlistening on 0.0.0.0:8080", b.expanded)
-    }
-}
-
-class LocalIpsPrimaryTest {
-    @Test
-    fun prefersTheLanAddress() {
-        assertEquals(
-            "192.168.68.126",
-            LocalIps.primary(listOf("100.81.194.26", "172.30.197.213", "192.168.68.126"))
-        )
-    }
-
-    @Test
-    fun fallsBackThroughPrivateRanges() {
-        assertEquals("10.0.0.5", LocalIps.primary(listOf("100.81.1.1", "10.0.0.5")))
-        assertEquals("172.16.0.2", LocalIps.primary(listOf("100.81.1.1", "172.16.0.2")))
-    }
-
-    @Test
-    fun publicAddressIsUsedWhenThereIsNoPrivateOne() {
-        assertEquals("100.81.1.1", LocalIps.primary(listOf("100.81.1.1")))
-    }
-
-    @Test
-    fun emptyListHasNoPrimary() {
-        assertEquals(null, LocalIps.primary(emptyList()))
-    }
-}
-
-class LocalIpsTest {
-    @Test
-    fun dropsLoopbackAndLinkLocalSortsNumerically() {
-        val out = LocalIps.fromInterfaces(
-            listOf("127.0.0.1", "10.0.0.9", "192.168.1.5", "169.254.7.7", "10.0.0.2", "fe80::1%wlan0", "not-an-ip")
-        )
-        assertEquals(listOf("10.0.0.2", "10.0.0.9", "192.168.1.5"), out)
-    }
-
-    @Test
-    fun rejectsOutOfRangeOctets() {
-        assertEquals(emptyList<String>(), LocalIps.fromInterfaces(listOf("999.1.1.1", "1.2.3.256")))
-    }
-
-    @Test
-    fun sortsOnAllFourOctets() {
-        val out = LocalIps.fromInterfaces(listOf("10.0.0.10", "10.0.0.9", "9.255.255.255", "10.0.1.2"))
-        assertEquals(listOf("9.255.255.255", "10.0.0.9", "10.0.0.10", "10.0.1.2"), out)
-    }
-
-    @Test
-    fun dedupes() {
-        assertEquals(listOf("10.0.0.5"), LocalIps.fromInterfaces(listOf("10.0.0.5", "10.0.0.5")))
+        assertEquals("up 5s · 3.0 tok/s\nlistening on 127.0.0.1:8080", b.expanded)
     }
 }

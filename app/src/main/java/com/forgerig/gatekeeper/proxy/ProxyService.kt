@@ -328,7 +328,6 @@ class ProxyService : Service() {
          */
         private const val NOTIFY_TICK_SEC = 5L
         /** How long a cached interface list stays fresh. */
-        private const val LOCAL_IPS_TTL_MS = 30_000L
         /** Notification channel: DEFAULT importance so "proxy is up" is visible. */
         private const val CHANNEL_ID = "proxy_status"
 
@@ -357,8 +356,6 @@ class ProxyService : Service() {
     // the listener (not the process) after consecutive failures.
     private var healthExec: java.util.concurrent.ScheduledExecutorService? = null
     /** Cached interface list + when it was refreshed. */
-    @Volatile private var cachedIps: List<String>? = null
-    @Volatile private var cachedIpsAt: Long = 0L
 
     /**
      * The single authoritative uptime stamp for the current run: written once,
@@ -452,7 +449,7 @@ class ProxyService : Service() {
                 // Ensure-running ping (app start): already up, don't flap.
                 // Re-assert the foreground state (the guard below would
                 // otherwise skip it) but don't re-post an identical shade row.
-                updateNotification("Proxy running on 0.0.0.0:$port", true, forceForeground = true)
+                updateNotification("Proxy running on $BIND_ADDRESS:$port", true, forceForeground = true)
                 stateCallback?.invoke(true, null)
                 return START_STICKY
             }
@@ -461,7 +458,7 @@ class ProxyService : Service() {
         }
         lastError = null
         if (mitmEnabled) MitmCa.ensureLoaded(this)
-        ProxyMetrics.event("Starting proxy on 0.0.0.0:$port")
+        ProxyMetrics.event("Starting proxy on $BIND_ADDRESS:$port")
         startProxy(port)
         return START_STICKY
     }
@@ -473,7 +470,7 @@ class ProxyService : Service() {
         // no-op guard in updateNotification would otherwise swallow this
         // and the service would never re-enter the foreground.
         if (running.get() == 1) {
-            updateNotification("Proxy running on 0.0.0.0:$port", true, forceForeground = true)
+            updateNotification("Proxy running on $BIND_ADDRESS:$port", true, forceForeground = true)
         }
         super.onTaskRemoved(rootIntent)
     }
@@ -500,10 +497,10 @@ class ProxyService : Service() {
             try {
                 serverSocket = ServerSocket()
                 serverSocket.setReuseAddress(true)
-                serverSocket.bind(InetSocketAddress("0.0.0.0", port))
+                serverSocket.bind(InetSocketAddress(BIND_ADDRESS, port))
                 serverSocket.setSoTimeout(1000)
             } catch (e: Exception) {
-                lastError = "Bind failed on 0.0.0.0:$port: ${e.message}"
+                lastError = "Bind failed on $BIND_ADDRESS:$port: ${e.message}"
                 // No listener: clear the run stamp so nothing can render an
                 // uptime for a run that never served.
                 startedAtMs = 0L
@@ -517,7 +514,7 @@ class ProxyService : Service() {
             }
             running.set(1)
             lastHealthOkMs = System.currentTimeMillis()
-            updateNotification("Proxy running on 0.0.0.0:$port", true)
+            updateNotification("Proxy running on $BIND_ADDRESS:$port", true)
             stateCallback?.invoke(true, null)
             scheduleHealth()
             while (running.get() == 1) {
@@ -1757,7 +1754,7 @@ SessionTracker.noteUsage(sessionId, found)
      */
     private fun refreshNotification() {
         if (running.get() != 1) return
-        updateNotification("Proxy running on 0.0.0.0:$port", true)
+        updateNotification("Proxy running on $BIND_ADDRESS:$port", true)
     }
 
     /**
@@ -1770,16 +1767,6 @@ SessionTracker.noteUsage(sessionId, found)
      * minutes, not seconds, so a short TTL takes it off the hot path without
      * the notification showing a stale address for long.
      */
-    private fun cachedLocalIps(): List<String> {
-        val now = System.currentTimeMillis()
-        val cached = cachedIps
-        if (cached != null && now - cachedIpsAt < LOCAL_IPS_TTL_MS) return cached
-        val fresh = LocalIps.list()
-        cachedIps = fresh
-        cachedIpsAt = now
-        return fresh
-    }
-
     /**
      * Elapsed proxy uptime as a compact "1h 04m" / "12m 30s" string.
      * Same authoritative stamp as [uptimeMs], so the shade and the in-app
@@ -1834,7 +1821,7 @@ SessionTracker.noteUsage(sessionId, found)
         val tps = if (isRunning) ProxyMetrics.outputTokensPerSecond() else 0.0
         val title = if (isRunning) "Network Proxy running" else "Network Proxy stopped"
         val body = if (isRunning) {
-            NotificationText.running(cachedLocalIps(), port, tps, uptimeText())
+            NotificationText.running(BIND_ADDRESS, port, tps, uptimeText())
         } else {
             NotificationText.plain(text)
         }

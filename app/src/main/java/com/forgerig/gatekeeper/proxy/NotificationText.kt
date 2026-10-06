@@ -36,20 +36,13 @@ object NotificationText {
      * there would be pure redundancy, and leaving it in the row would break
      * the status-only contract.
      */
-    fun running(ips: List<String>, port: Int, tps: Double = 0.0, uptime: String? = null): Body {
+    fun running(address: String, port: Int, tps: Double = 0.0, uptime: String? = null): Body {
         val status = statusLine(tps, uptime)
-        if (ips.isEmpty()) {
-            // No address was enumerated, so the status line is all the
-            // collapsed row can honestly show. The bind-address fallback is
-            // kept in the *expanded* body only: it still earns its place
-            // there, because without it there is no port anywhere in the
-            // notification and the user has no way to point a client at the
-            // proxy — the one job this notification has. It stays out of the
-            // collapsed row, which is status-only by contract.
-            return Body(status, "$status\nlistening on 0.0.0.0:$port")
-        }
-        val addresses = ips.joinToString("\n") { "$it:$port" }
-        return Body(status, "$status\n$addresses")
+        // A single address, always [BIND_ADDRESS]: the listener is
+        // loopback-only, so enumerating the device's routable addresses
+        // would advertise endpoints that cannot be connected to. Pointing
+        // the user at 127.0.0.1 is the only answer that works.
+        return Body(status, "$status\nlistening on $address:$port")
     }
 
     /** Stopped / error body: just the caller's message. */
