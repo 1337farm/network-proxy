@@ -24,8 +24,8 @@ import com.google.android.material.textfield.TextInputEditText
 class MainActivity : AppCompatActivity() {
 
     companion object {
-        private const val PREFS = "gatekeeper"
-        private const val KEY_SHOULD_RUN = "proxyShouldRun"
+        private val PREFS = ProxyPrefs.NAME
+        private val KEY_SHOULD_RUN = ProxyPrefs.SHOULD_RUN
         private const val KEY_NOTIF_ASKED = "notifPermissionAsked"
         /** Verbose response payload logging (ProxyService reads the same key). */
         const val VERBOSE_LOGGING_PREF = "verbose_logging"
@@ -123,6 +123,11 @@ class MainActivity : AppCompatActivity() {
         val cleanupScriptHeader = findViewById<android.view.View>(R.id.cleanupScriptHeader)
         var cleanupScriptExpanded = false
         val portInput = findViewById<TextInputEditText>(R.id.portInput)
+        // The layout ships a hardcoded default, so a cold start used to
+        // revert the field to it and then auto-start the proxy on the wrong
+        // port. Whatever was last configured wins.
+        val savedPort = prefs().getInt(ProxyPrefs.PORT, 0)
+        if (savedPort > 0) portInput.setText(savedPort.toString())
         // Metrics + Decrypt-HTTPS are always on (no toggles by design).
 
         // Verbose response logging: opt-in capture of response payloads
@@ -155,7 +160,13 @@ class MainActivity : AppCompatActivity() {
         portInput.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
             override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun afterTextChanged(s: android.text.Editable?) = refreshScript()
+            override fun afterTextChanged(s: android.text.Editable?) {
+                // Persist on edit rather than only on Start: the receiver that
+                // restores the proxy after a reboot or an upgrade cannot read
+                // a text field, so the pref is the only channel it has.
+                s?.toString()?.toIntOrNull()?.let { ProxyPrefs.setPort(this@MainActivity, it) }
+                refreshScript()
+            }
         })
         refreshScript()
 
@@ -197,7 +208,10 @@ class MainActivity : AppCompatActivity() {
                 prefs().edit().putBoolean(KEY_SHOULD_RUN, false).apply()
                 viewModel.stopProxy()
             } else {
-                prefs().edit().putBoolean(KEY_SHOULD_RUN, true).apply()
+                prefs().edit()
+                    .putBoolean(KEY_SHOULD_RUN, true)
+                    .putInt(ProxyPrefs.PORT, port)
+                    .apply()
                 if (!MitmCa.caCertFile(this).exists()) {
                     Toast.makeText(
                         this,
