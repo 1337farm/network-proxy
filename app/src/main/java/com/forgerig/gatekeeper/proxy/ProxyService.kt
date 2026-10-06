@@ -347,7 +347,7 @@ class ProxyService : Service() {
     // Written on the main thread (onStartCommand/onBind), read by all 32 pool
     // threads and the health/notification executor. @Volatile only — no
     // locking, so the hot relay read paths stay lock-free.
-    @Volatile private var port = 3128
+    @Volatile private var port = PROXY_PORT
     @Volatile private var metricsEnabled = true
     @Volatile private var mitmEnabled = true
     private var client: OkHttpClient? = null
@@ -443,12 +443,7 @@ class ProxyService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        port = intent?.getIntExtra("port", 3128) ?: 3128
-        // Record the port actually being served, from whichever path started
-        // us (UI, reboot, app upgrade). Without this the configured port only
-        // ever existed in a text field, so anything that restores the proxy
-        // without a UI had no way to learn it and fell back to a default.
-        ProxyPrefs.setPort(this, port)
+        port = PROXY_PORT
         metricsEnabled = intent?.getBooleanExtra("metricsEnabled", true) ?: true
         mitmEnabled = intent?.getBooleanExtra("mitmEnabled", true) ?: true
 

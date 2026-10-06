@@ -14,9 +14,6 @@ import androidx.core.content.ContextCompat
 internal object ProxyPrefs {
     const val NAME = "gatekeeper"
     const val SHOULD_RUN = "proxyShouldRun"
-    const val PORT = "proxyPort"
-
-    const val DEFAULT_PORT = 3128
 
     private fun prefs(context: Context): SharedPreferences =
         context.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -27,21 +24,6 @@ internal object ProxyPrefs {
     fun setShouldRun(context: Context, run: Boolean) {
         prefs(context).edit().putBoolean(SHOULD_RUN, run).apply()
     }
-
-    fun port(context: Context): Int = resolvePort(prefs(context).getInt(PORT, DEFAULT_PORT))
-
-    fun setPort(context: Context, port: Int) {
-        prefs(context).edit().putInt(PORT, port).apply()
-    }
-
-    /**
-     * A stored port is only trusted inside the legal range. The value is
-     * used to bind a listener the device depends on, so a corrupt or
-     * hand-edited preference must fall back to the default rather than
-     * throw at boot and leave the proxy down.
-     */
-    fun resolvePort(stored: Int): Int =
-        if (stored in 1..65535) stored else DEFAULT_PORT
 }
 
 /**
@@ -70,8 +52,8 @@ class BootReceiver : BroadcastReceiver() {
 
         ContextCompat.startForegroundService(
             context,
+            // No port to pass: there is only one, in PROXY_PORT.
             Intent(context, ProxyService::class.java).apply {
-                putExtra("port", ProxyPrefs.port(context))
                 // Do not flap the listener if the service is already up:
                 // an update can deliver this while it is still running.
                 putExtra(ProxyService.EXTRA_ONLY_IF_STOPPED, true)
