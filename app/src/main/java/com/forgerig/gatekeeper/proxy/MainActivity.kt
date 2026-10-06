@@ -63,8 +63,7 @@ class MainActivity : AppCompatActivity() {
             if (granted) {
                 // Re-post so the drawer shows it immediately.
                 viewModel.ensureRunning(
-                    findViewById<TextInputEditText>(R.id.portInput)?.text?.toString()?.toIntOrNull() ?: 3128,
-                    metricsEnabled = true, mitmEnabled = true
+                    PROXY_PORT, metricsEnabled = true, mitmEnabled = true
                 )
             } else {
                 Toast.makeText(
@@ -122,12 +121,6 @@ class MainActivity : AppCompatActivity() {
         val cleanupScriptExpandIcon = findViewById<ImageView>(R.id.cleanupScriptExpandIcon)
         val cleanupScriptHeader = findViewById<android.view.View>(R.id.cleanupScriptHeader)
         var cleanupScriptExpanded = false
-        val portInput = findViewById<TextInputEditText>(R.id.portInput)
-        // The layout ships a hardcoded default, so a cold start used to
-        // revert the field to it and then auto-start the proxy on the wrong
-        // port. Whatever was last configured wins.
-        val savedPort = prefs().getInt(ProxyPrefs.PORT, 0)
-        if (savedPort > 0) portInput.setText(savedPort.toString())
         // Metrics + Decrypt-HTTPS are always on (no toggles by design).
 
         // Verbose response logging: opt-in capture of response payloads
@@ -143,8 +136,7 @@ class MainActivity : AppCompatActivity() {
         // Auto-start: ensure the proxy is running on app start unless the
         // user explicitly stopped it (Stop persists the opt-out).
         if (savedInstanceState == null && prefs().getBoolean(KEY_SHOULD_RUN, true)) {
-            val p = portInput.text.toString().toIntOrNull() ?: 3128
-            viewModel.ensureRunning(p, metricsEnabled = true, mitmEnabled = true)
+            viewModel.ensureRunning(PROXY_PORT, metricsEnabled = true, mitmEnabled = true)
         }
 
         // The "proxy is running" notification is the only way to see the
@@ -152,23 +144,9 @@ class MainActivity : AppCompatActivity() {
         // once. Skipped when already answered (or below API 33).
         ensureNotificationPermission()
 
-        val refreshScript = {
-            val p = portInput.text.toString().toIntOrNull() ?: 3128
-            setupScriptText.text = SetupScript.build(this, p)
-            cleanupScriptText.text = SetupScript.cleanup(p)
-        }
-        portInput.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
-            override fun afterTextChanged(s: android.text.Editable?) {
-                // Persist on edit rather than only on Start: the receiver that
-                // restores the proxy after a reboot or an upgrade cannot read
-                // a text field, so the pref is the only channel it has.
-                s?.toString()?.toIntOrNull()?.let { ProxyPrefs.setPort(this@MainActivity, it) }
-                refreshScript()
-            }
-        })
-        refreshScript()
+        // Static now that there is no port field to re-render from.
+        setupScriptText.text = SetupScript.build(this)
+        cleanupScriptText.text = SetupScript.cleanup()
 
         val toggleExpand = {
             setupScriptExpanded = !setupScriptExpanded
@@ -202,16 +180,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         startStopButton.setOnClickListener {
-            val port = portInput.text.toString().toIntOrNull() ?: 3128
-
             if (viewModel.isRunning.value == true) {
                 prefs().edit().putBoolean(KEY_SHOULD_RUN, false).apply()
                 viewModel.stopProxy()
             } else {
-                prefs().edit()
-                    .putBoolean(KEY_SHOULD_RUN, true)
-                    .putInt(ProxyPrefs.PORT, port)
-                    .apply()
+                prefs().edit().putBoolean(KEY_SHOULD_RUN, true).apply()
                 if (!MitmCa.caCertFile(this).exists()) {
                     Toast.makeText(
                         this,
@@ -219,9 +192,8 @@ class MainActivity : AppCompatActivity() {
                         Toast.LENGTH_LONG
                     ).show()
                 }
-                viewModel.startProxy(port, metricsEnabled = true, mitmEnabled = true)
+                viewModel.startProxy(PROXY_PORT, metricsEnabled = true, mitmEnabled = true)
             }
-            refreshScript()
         }
 
         copyScriptButton.setOnClickListener {
@@ -957,7 +929,6 @@ class MainActivity : AppCompatActivity() {
         val statusDot = findViewById<View>(R.id.statusDot)
         val portText = findViewById<TextView>(R.id.portText)
         val upstreamText = findViewById<TextView>(R.id.upstreamText)
-        val portInput = findViewById<com.google.android.material.textfield.TextInputEditText>(R.id.portInput)
 
         // Status hues come from the theme system (desaturated emerald /
         // soft red / amber) so Running / Stopped / warning sit with the
@@ -972,7 +943,7 @@ class MainActivity : AppCompatActivity() {
             statusText.text = error
             statusText.setTextColor(warning)
             statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(warning)
-            portText.text = "Port ${portInput.text} — tap Start to retry"
+            portText.text = getString(R.string.port_bind_failed, PROXY_PORT)
             portText.visibility = View.VISIBLE
             upstreamText.visibility = View.GONE
         } else if (isRunning) {
@@ -983,8 +954,8 @@ class MainActivity : AppCompatActivity() {
             statusText.setTextColor(running)
             statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(running)
             val lan = SetupScript.lanIp(this)
-            portText.text = if (lan.isNotBlank()) "127.0.0.1:${portInput.text} • LAN $lan:${portInput.text}"
-                else "127.0.0.1:${portInput.text}"
+            portText.text = if (lan.isNotBlank()) "127.0.0.1:$PROXY_PORT • LAN $lan:$PROXY_PORT"
+                else "127.0.0.1:$PROXY_PORT"
             portText.visibility = View.VISIBLE
             upstreamText.visibility = View.GONE
         } else {

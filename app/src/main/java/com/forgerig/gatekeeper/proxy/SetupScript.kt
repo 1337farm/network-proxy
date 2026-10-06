@@ -31,7 +31,11 @@ object SetupScript {
      *  smart quotes, no arrows) - proot/Termux locales mangle multibyte
      *  chars on paste and corrupt the paste. [scriptFor] is the pure,
      *  unit-tested core; [build] keeps the Context signature for callers. */
-    fun build(context: Context, port: Int): String = scriptFor(port)
+    /**
+     * No port parameter: there is only one ([PROXY_PORT]), so the script
+     * and the listener cannot drift apart.
+     */
+    fun build(context: Context): String = scriptFor(PROXY_PORT)
 
     /**
      * Non-LLM hosts that bypass the proxy entirely (direct connection).
@@ -330,7 +334,7 @@ object SetupScript {
      *  guarded (missing file / already-removed lines are no-ops), unsets
      *  are idempotent, and the probes never mutate state. Also purges
      *  legacy unmarked exports left by older setup builds. */
-    fun cleanup(port: Int = 3128): String {
+    fun cleanup(port: Int = PROXY_PORT): String {
         return """
             |# >>> network-proxy cleanup (run in proot Ubuntu) >>>
             |# NOTE: the proxy runs inside the Android app, not here - there

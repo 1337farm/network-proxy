@@ -248,21 +248,6 @@
                         android:textStyle="bold"
                         style="@style/Text.SectionTitle"/>
 
-                    <com.google.android.material.textfield.TextInputLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:hint="@string/port_hint"
-                        style="@style/Widget.Material3.TextInputLayout.OutlinedBox">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/portInput"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:inputType="number"
-                        android:text="3128"/>
-                    </com.google.android.material.textfield.TextInputLayout>
-
                     <!-- Opt-in capture of response payloads into the
                          in-memory Response Log (see ResponseLog). Off by
                          default: the bodies are model output. -->
