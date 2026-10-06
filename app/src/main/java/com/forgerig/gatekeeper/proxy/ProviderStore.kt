@@ -295,7 +295,18 @@ class ProviderStore private constructor() {
          * Retarget [oldUrl] onto the leg provider: keep the request path,
          * avoiding duplication when the base already carries it.
          */
-        fun retarget(oldUrl: String, legBaseUrl: String): String {
+        /**
+         * Retarget [oldUrl] onto [legBaseUrl]'s origin.
+         *
+         * [preferLegScheme] must be set when [oldUrl] is the gateway
+         * placeholder rather than a real client request. The placeholder is
+         * plain http, and normally the incoming scheme is what we want to
+         * keep (an intercepted https request must stay https) -- but for a
+         * front-door request there is no incoming scheme to preserve, only
+         * our own placeholder, and inheriting it would send the provider API
+         * key over plaintext http. The leg's own scheme is correct there.
+         */
+        fun retarget(oldUrl: String, legBaseUrl: String, preferLegScheme: Boolean = false): String {
             val old = java.net.URL(oldUrl)
             val leg = java.net.URL(legBaseUrl.trimEnd('/'))
             var path = old.file.ifEmpty { "/" }
@@ -304,7 +315,8 @@ class ProviderStore private constructor() {
                 path = path.substring(basePath.length).ifEmpty { "/" }
             }
             val newPath = basePath + (if (path.startsWith("/")) path else "/$path")
-            return java.net.URL(old.protocol, leg.host, leg.port, newPath).toString()
+            val scheme = if (preferLegScheme) leg.protocol else old.protocol
+            return java.net.URL(scheme, leg.host, leg.port, newPath).toString()
         }
     }
 
@@ -324,6 +336,20 @@ class ProviderStore private constructor() {
         failedModel: String,
         failedKeyId: String
     ): ModelRouter.Selection? = ModelRouter.select(this, fromId, failedModel, failedKeyId)
+
+    /**
+     * The provider to use when a request named no configured route.
+     *
+     * A client calling the proxy as its provider sends whatever model it
+     * wants; there may be no route for it. Rather than 404, fall back to a
+     * provider that actually has a usable key and let the upstream decide
+     * whether it knows the model. Deterministic (insertion order) so the
+     * same request always lands on the same provider, which matters for
+     * session affinity and for reproducible failover.
+     */
+    @Synchronized
+    fun defaultProvider(): Pair<Provider, ApiKey>? =
+        providers.values.firstNotNullOfOrNull { p -> activeKey(p.id) }
 
     /** Active key for [providerId], skipping disabled/cooled/day-limited keys. Null if none usable. */
     @Synchronized
