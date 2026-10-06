@@ -572,7 +572,13 @@ class ProxyService : Service() {
                 return
             }
 
-            var targetUrl = if (url.startsWith("http")) url else "http://${socket.inetAddress.hostAddress}$url"
+            // For a forward-proxy request the target names a remote host.
+            // For a front-door request there is no target yet: the upstream
+            // comes from the route table, so keep a placeholder that the
+            // rewrite below replaces (or that the default-provider fallback
+            // fills in). Never reconstruct it from the peer address here --
+            // that would address the request back at this same socket.
+            var targetUrl = if (url.startsWith("http")) url else "http://gateway.invalid$url"
             if (metricsEnabled) ProxyMetrics.recordRequestStart(
                 sessionId, requestId, targetUrl, method,
                 ProviderBroker.store(this).llmHosts()
@@ -592,6 +598,23 @@ class ProxyService : Service() {
                     if (key.equals("Retry-After", true)) retryAfterHeaders.add(value)
                 }
                 line = readLine(rawIn)
+            }
+
+            // "We are the provider": an origin-form target whose Host is this
+            // proxy is a request addressed to our own front door, not one
+            // being forwarded somewhere. It skips the forward-proxy
+            // reconstruction below (which would otherwise point the request
+            // back at the peer address), and it is brokered unconditionally:
+            // no interception is involved, so there is no foreign traffic to
+            // keep away from the rewrite path.
+            val gatewayMode = GatewayRequest.isAddressedToUs(url, headers["Host"], port)
+            if (gatewayMode) {
+                ProxyMetrics.event("Gateway request on :$port ${GatewayRequest.pathOf(url)}")
+            } else if (!url.startsWith("http")) {
+                // Origin-form that is not addressed to us: keep the legacy
+                // forward-proxy reconstruction so existing traffic is
+                // completely unaffected by this change.
+                targetUrl = "http://${socket.inetAddress.hostAddress}$url"
             }
 
             // Session correlation: `x-session-id` names the conversation
@@ -637,11 +660,17 @@ class ProxyService : Service() {
             // MITM) is reserved for configured provider hosts. Anything
             // else tunnels opaque by default, or 403s in strict mode.
             val routeStore = ProviderBroker.store(this)
-            val llmDecision = LlmPolicy.decide(
-                LlmPolicy.extractHost(targetUrl),
-                routeStore.llmHosts(),
-                routeStore.llmOnlyStrict
-            )
+            val llmDecision = if (gatewayMode) {
+                // The client addressed us directly, so there is no host to
+                // match against an allowlist: this is the provider call.
+                LlmPolicy.Decision.BROKERED
+            } else {
+                LlmPolicy.decide(
+                    LlmPolicy.extractHost(targetUrl),
+                    routeStore.llmHosts(),
+                    routeStore.llmOnlyStrict
+                )
+            }
             if (llmDecision == LlmPolicy.Decision.DENY) {
                 val msg = LlmPolicy.denyBody(LlmPolicy.extractHost(targetUrl))
                 ProxyMetrics.eventWarning("LLM-only deny: $msg")
@@ -693,7 +722,7 @@ class ProxyService : Service() {
                                 routeLeg = leg
                                 bj.put("model", leg.model)
                                 body = bj.toString().toByteArray(Charsets.UTF_8)
-                                targetUrl = ProviderStore.retarget(targetUrl, lp.baseUrl)
+                                targetUrl = ProviderStore.retarget(targetUrl, lp.baseUrl, gatewayMode)
                                 headers.keys.filter {
                                     it.equals("Content-Length", true)
                                 }.forEach { headers.remove(it) }
@@ -707,6 +736,38 @@ class ProxyService : Service() {
                         }
                     }
                 } catch (_: Exception) { /* not JSON — passthrough */ }
+            }
+
+            // Front-door requests that named no configured route still have to
+            // go somewhere: targetUrl is still the gateway.invalid
+            // placeholder. Send them to a provider that actually has a usable
+            // key and let the upstream judge whether it knows the model --
+            // a client calling us as its provider should not have to know our
+            // routing table to get an answer.
+            if (gatewayMode && routeLeg == null) {
+                val fallback = routeStore.defaultProvider()
+                if (fallback == null) {
+                    val msg = "No provider configured. Add one before calling the proxy as your provider."
+                    val bb = msg.toByteArray()
+                    ProxyMetrics.eventWarning("Gateway request with no usable provider")
+                    output.write(
+                        ("HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n" +
+                            "Content-Length: ${bb.size}\r\nConnection: close\r\n\r\n").toByteArray()
+                    )
+                    output.write(bb)
+                    output.flush()
+                    if (metricsEnabled) ProxyMetrics.recordRequestEnd(
+                        sessionId, requestId, 503, bb.size.toLong(), NetworkScenario.PERMANENT_FAILURE
+                    )
+                    return
+                }
+                // Retarget only. Key injection is left to the existing
+                // ProviderStore.matchProvider path below, which resolves the
+                // provider from the now-rewritten host and strips whatever
+                // credential the client sent. Duplicating that here would be
+                // a second place for auth to go wrong.
+                targetUrl = ProviderStore.retarget(targetUrl, fallback.first.baseUrl, preferLegScheme = true)
+                ProxyMetrics.event("Gateway fallback → ${fallback.first.id}")
             }
 
             val reqHeaders = headers.toHeaders()
