@@ -444,6 +444,11 @@ class ProxyService : Service() {
             return START_NOT_STICKY
         }
         port = intent?.getIntExtra("port", 3128) ?: 3128
+        // Record the port actually being served, from whichever path started
+        // us (UI, reboot, app upgrade). Without this the configured port only
+        // ever existed in a text field, so anything that restores the proxy
+        // without a UI had no way to learn it and fell back to a default.
+        ProxyPrefs.setPort(this, port)
         metricsEnabled = intent?.getBooleanExtra("metricsEnabled", true) ?: true
         mitmEnabled = intent?.getBooleanExtra("mitmEnabled", true) ?: true
 
