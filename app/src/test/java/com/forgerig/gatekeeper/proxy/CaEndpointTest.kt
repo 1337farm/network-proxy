@@ -38,8 +38,10 @@ class CaEndpointTest {
 
     @Test
     fun remotePeersCannotFetchTheCa() {
-        // The listener binds 0.0.0.0, so without a loopback gate any LAN
-        // host could fingerprint that this device runs a MITM proxy.
+        // The listener is loopback-only, so no remote peer can reach this
+        // endpoint at all. The gate stays as a second, independent guard on
+        // a secret -- if the bind address ever widens again, this still
+        // refuses.
         assertFalse(CaEndpoint.isLocalCaRequest("/ca.pem", peerIsLoopback = false))
         assertFalse(CaEndpoint.isLocalCaRequest("http://127.0.0.1:3128/ca.pem", peerIsLoopback = false))
     }
