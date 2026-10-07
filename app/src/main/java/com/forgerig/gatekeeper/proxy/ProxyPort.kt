@@ -14,10 +14,11 @@ package com.forgerig.gatekeeper.proxy
  * SetupScript is pure and is exercised by JVM tests that must not touch
  * Android classes.
  *
- * 3128 is the only port this needs. The host stack's retry proxy listens
- * on 3130 and forwards here precisely so the app can own 3128 outright.
+ * 3129 is the only port this needs: one above the stable proxy's 3128
+ * so both apps run side by side on the same device. (The host stack's
+ * retry proxy listens on 3130 and forwards to the STABLE app, not here.)
  */
-const val PROXY_PORT = 3128
+const val PROXY_PORT = 3129
 
 /**
  * The address this proxy binds.

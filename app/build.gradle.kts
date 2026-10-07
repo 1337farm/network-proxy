@@ -9,7 +9,12 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.forgerig.gatekeeper.proxy"
+        // Forge variant: a sibling install alongside the stable proxy. The
+        // applicationId is the install identity, so it must differ from the
+        // stable app's (com.forgerig.gatekeeper.proxy) or the two APKs
+        // overwrite each other on the device. The Kotlin namespace stays
+        // put: renaming it would touch every file for zero runtime effect.
+        applicationId = "com.forgerig.forge.proxy"
         minSdk = 26
         targetSdk = 35
         // Run one git command against the build's own checkout, returning
