@@ -202,6 +202,22 @@ class ProxyService : Service() {
             .connectTimeout(30_000, TimeUnit.MILLISECONDS)
             .readTimeout(120_000, TimeUnit.MILLISECONDS)
             .writeTimeout(120_000, TimeUnit.MILLISECONDS)
+            // Provider calls must never touch a proxy: the device may carry
+            // a system/APN proxy (or a debugging one), and a MITM or
+            // filtering hop in front of provider traffic breaks TLS trust
+            // and leaks credentials outside this channel.
+            .proxy(java.net.Proxy.NO_PROXY)
+        // Brokered TLS goes through BouncyCastle (see TlsTransport): the
+        // platform Conscrypt fingerprint is blocked at several provider
+        // edges. Null (any failure) keeps the platform default.
+        TlsTransport.upstreamFactory()?.let { (factory, tm) ->
+            try {
+                builder.sslSocketFactory(factory, tm)
+                ProxyMetrics.event("Upstream TLS via BouncyCastle")
+            } catch (e: Exception) {
+                ProxyMetrics.eventWarning("BC TLS factory rejected: ${e.message}")
+            }
+        } ?: ProxyMetrics.eventWarning("BC TLS unavailable; upstream on platform TLS")
         client = builder.build()
         pool = Executors.newFixedThreadPool(POOL_SIZE)
 
@@ -628,6 +644,18 @@ class ProxyService : Service() {
                     // any inline lambda — labeled jumps need loop scope).
                     val preCode = resp.code
                     val kc = keyCtx
+                    // Upstream-edge diagnostics: header NAMES only (values can
+                    // carry sessions) plus the negotiated TLS parameters, so
+                    // a hostile edge names itself in the log instead of
+                    // presenting as a faceless 403.
+                    if (preCode == 403) {
+                        val hs = try { resp.handshake } catch (_: Exception) { null }
+                        ProxyMetrics.eventWarning(
+                            "upstream 403 diag: tls=${hs?.tlsVersion} cipher=${hs?.cipherSuite} " +
+                                "respHeaders=${resp.headers.names()} " +
+                                "cf-mitigated=${resp.header("cf-mitigated")}"
+                        )
+                    }
                     if (kc != null && store.keyRolloverEnabled &&
                         (preCode == 401 || preCode == 403 || preCode == 429 || preCode in 500..599) &&
                         keyRounds + 1 < maxKeyRounds

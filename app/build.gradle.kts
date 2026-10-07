@@ -137,6 +137,10 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Pure-Java TLS stack for brokered upstream calls (see TlsTransport):
+    // its ClientHello passes edges that block the on-device Conscrypt
+    // fingerprint. bcprov/bcutil arrive transitively at the same version.
+    implementation("org.bouncycastle:bctls-jdk18on:1.78.1")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
     // X.509 issuance for the opt-in HTTPS split (local CA + per-host leafs).
