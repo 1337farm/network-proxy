@@ -34,6 +34,27 @@ object CaEndpoint {
         }
     }
 
+    /**
+     * True for a request asking us to hand back the endpoint certificate.
+     *
+     * Same gate as [isLocalCaRequest]: loopback callers only. The endpoint
+     * certificate is not a secret in the way the MITM CA is, but publishing it
+     * is still only ever something this device's own client should do, and the
+     * check costs nothing.
+     */
+    fun isLocalEndpointCertRequest(target: String, peerIsLoopback: Boolean = true): Boolean {
+        if (!peerIsLoopback) return false
+        val path = pathOf(target) ?: return false
+        if (path != ENDPOINT_CERT_PATH) return false
+        if (target.startsWith("/")) return true
+        return try {
+            val host = java.net.URI(target).host?.lowercase() ?: return false
+            host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "[::1]"
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     /** True when [remoteAddress] is a loopback literal. */
     fun isLoopbackPeer(remoteAddress: String?): Boolean {
         val a = remoteAddress?.trim()?.removePrefix("[")?.removeSuffix("]").orEmpty()
@@ -55,3 +76,6 @@ object CaEndpoint {
         }
     }
 }
+
+/** Path the client fetches the pinned endpoint certificate from. */
+const val ENDPOINT_CERT_PATH = "/endpoint-cert.pem"

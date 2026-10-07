@@ -545,12 +545,60 @@ class ProxyService : Service() {
         val requestId = UUID.randomUUID().toString()
         val startedAt = System.currentTimeMillis()
         activeSessions.add(sessionId)
+        var tlsSession: EndpointTls? = null
         try {
             socket.setSoTimeout(30_000)
             // Single buffered source for headers AND body: avoids losing bytes
             // buffered by a discarded reader (the old multi-reader bug).
-            val rawIn = BufferedInputStream(socket.getInputStream())
-            val output = socket.getOutputStream()
+            // One listener serves two clients with different requirements: the
+            // front door arrives as TLS (the client pinned our endpoint cert),
+            // while the host retry proxy dials us in plaintext and must keep
+            // working. Sniff the first byte -- a TLS record starts 0x16, and
+            // every HTTP method starts with an ASCII letter -- then hand the
+            // socket to the right side.
+            //
+            // The peek must not let a buffered reader run ahead: a TLS
+            // ClientHello is hundreds of bytes, and if those land in a
+            // BufferedInputStream that the layered SSLSocket never sees, the
+            // handshake dies with "unexpected message". Read exactly one byte
+            // and put it back with a PushbackInputStream, which both the
+            // plaintext path and the TLS wrap read through.
+            val pushed = java.io.PushbackInputStream(socket.getInputStream(), 1)
+            val firstByte = try { pushed.read() } catch (_: Exception) { -1 }
+            if (firstByte >= 0) pushed.unread(firstByte)
+            val tls = firstByte == TLS_HANDSHAKE_FIRST_BYTE
+
+            // One stream pair for the whole request. Plaintext clients use the
+            // socket streams directly; TLS clients get a pin-verified session
+            // driven over the very same streams via EndpointTls (see its doc
+            // for why an SSLSocket layered over the socket cannot work here).
+            val readSource: java.io.InputStream
+            val writeTarget: java.io.OutputStream
+            if (tls) {
+                val engine = EndpointCert.engine(this)
+                if (engine == null) {
+                    try { socket.close() } catch (_: Exception) {}
+                    ProxyMetrics.eventWarning("TLS request but endpoint cert unavailable; dropped")
+                    return
+                }
+                try {
+                    tlsSession = EndpointTls.handshake(engine, pushed, socket.getOutputStream())
+                    socket.setSoTimeout(30_000)
+                    ProxyMetrics.event("TLS handshake ok from ${socket.inetAddress?.hostAddress}")
+                } catch (e: Exception) {
+                    try { tlsSession?.close() } catch (_: Exception) {}
+                    ProxyMetrics.eventWarning("TLS handshake rejected: ${e.javaClass.simpleName}")
+                    return
+                }
+                readSource = tlsSession.input()
+                writeTarget = tlsSession.output()
+            } else {
+                readSource = pushed
+                writeTarget = socket.getOutputStream()
+            }
+            val inputStream = readSource
+            val output = writeTarget
+            val rawIn = BufferedInputStream(inputStream)
 
             val requestLine = readLine(rawIn) ?: return
             val parts = requestLine.split(" ")
@@ -637,7 +685,12 @@ class ProxyService : Service() {
             // GET http://example.com/ca.pem must still go upstream.
             // Handled here, before any upstream forwarding, so it never
             // leaks upstream.
-            if (method == "GET" && isLocalCaRequest(url, CaEndpoint.isLoopbackPeer(socket.inetAddress?.hostAddress))) {
+            val peerIsLoopback = CaEndpoint.isLoopbackPeer(socket.inetAddress?.hostAddress)
+            if (method == "GET" && CaEndpoint.isLocalEndpointCertRequest(url, peerIsLoopback)) {
+                serveEndpointCertPem(output, sessionId, requestId)
+                return
+            }
+            if (method == "GET" && isLocalCaRequest(url, peerIsLoopback)) {
                 serveCaPem(output, sessionId, requestId)
                 return
             }
@@ -1054,6 +1107,7 @@ SessionTracker.noteUsage(sessionId, found)
             activeSessions.remove(sessionId)
             SessionTracker.clear(sessionId)
             ProxyMetrics.recordRequestEndIfOpen(sessionId, requestId)
+            try { tlsSession?.close() } catch (_: Exception) {}
             try { socket.close() } catch (_: Exception) {}
         }
     }
@@ -1898,6 +1952,50 @@ SessionTracker.noteUsage(sessionId, found)
     /** Path component of an origin-form or absolute-form request target. */
     internal fun caPathOf(target: String): String? = CaEndpoint.pathOf(target)
 
+    /** Serve our endpoint certificate PEM inline; never forwards upstream. */
+    private fun serveEndpointCertPem(
+        output: java.io.OutputStream,
+        sessionId: String,
+        requestId: String
+    ) {
+        try {
+            val pem = EndpointCert.pem(this)
+            if (pem == null) {
+                val msg = "Endpoint certificate unavailable"
+                output.write(
+                    ("HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n" +
+                        "Content-Length: ${msg.length}\r\nConnection: close\r\n\r\n$msg").toByteArray()
+                )
+                output.flush()
+                if (metricsEnabled) ProxyMetrics.recordRequestEnd(
+                    sessionId, requestId, 503, 0, NetworkScenario.UNKNOWN
+                )
+                return
+            }
+            val body = pem.toByteArray(Charsets.UTF_8)
+            output.write(
+                ("HTTP/1.1 200 OK\r\nContent-Type: application/x-pem-file\r\n" +
+                    "Content-Length: ${body.size}\r\nConnection: close\r\n\r\n").toByteArray()
+            )
+            output.write(body)
+            output.flush()
+            requestCount.incrementAndGet()
+            bytesOut.addAndGet(body.size.toLong())
+            if (metricsEnabled) ProxyMetrics.recordRequestEnd(
+                sessionId, requestId, 200, body.size.toLong(), NetworkScenario.SUCCESS
+            )
+            ProxyMetrics.event("Served endpoint certificate (${humanBytesShort(body.size.toLong())})")
+        } catch (e: Exception) {
+            try {
+                output.write("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".toByteArray())
+                output.flush()
+            } catch (_: Exception) {}
+            if (metricsEnabled) ProxyMetrics.recordRequestEnd(
+                sessionId, requestId, 500, 0, NetworkScenario.UNKNOWN
+            )
+        }
+    }
+
     /** Serve the MITM CA PEM inline; never forwards upstream. */
     private fun serveCaPem(
         output: java.io.OutputStream,
@@ -2113,3 +2211,13 @@ SessionTracker.noteUsage(sessionId, found)
         super.onDestroy()
     }
 }
+
+/**
+ * First byte of a TLS record: handshake (content type 22).
+ *
+ * Used to tell a front-door TLS connection from the plaintext the host retry
+ * proxy speaks, on the one listener that serves both. HTTP method names all
+ * begin with an ASCII letter, so this byte cannot collide with a plaintext
+ * request line.
+ */
+private const val TLS_HANDSHAKE_FIRST_BYTE = 0x16
