@@ -12,7 +12,7 @@ class BackupFileTest {
         val name = CredentialVault.backupFilename(1_789_000_000_000L)
         assertTrue(
             "unexpected shape: $name",
-            Regex("""^nanogatekeeper-backup-\d{8}-\d{4}\.txt$""").matches(name)
+            Regex("""^forge-router-backup-\d{8}-\d{4}\.txt$""").matches(name)
         )
     }
 

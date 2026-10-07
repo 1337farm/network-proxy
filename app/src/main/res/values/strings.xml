@@ -5,9 +5,6 @@
     <string name="start_proxy">Start Router</string>
     <string name="stop_proxy">Stop Router</string>
     <string name="port_bind_failed">Cannot listen on port %1$d — another app may be using it</string>
-    <string name="setup_script_title">Terminal setup script</string>
-    <string name="setup_script_hint">Copy and paste into Termux / proot Ubuntu to route opencode through this router.</string>
-    <string name="copy_setup_script">Copy setup script</string>
     <string name="metrics_enabled">Enable Metrics</string>
     <string name="metrics_export_path">Export Path</string>
     <string name="status_running">Running</string>
@@ -17,10 +14,6 @@
     <string name="active_sessions">Active Sessions: %1$d</string>
     <string name="export_metrics">Export Metrics</string>
     <string name="clear_metrics">Clear Metrics</string>
-    <string name="expand">Expand</string>
-    <string name="cleanup_script_title">Terminal cleanup script</string>
-    <string name="cleanup_script_hint">Copy and paste into Termux / proot Ubuntu to remove router env, kill daemon, clear metrics.</string>
-    <string name="copy_cleanup_script">Copy cleanup script</string>
     <string name="providers_title">Providers &amp; keys</string>
     <string name="providers_hint">Providers are built in — just add keys. The router injects the active key per provider and rolls over on 429/401. Secrets stay encrypted on-device.</string>
     <string name="add_key">Add key</string>

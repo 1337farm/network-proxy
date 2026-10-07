@@ -1,18 +1,16 @@
 package com.forgerig.gatekeeper.proxy
 
 /**
- * The single port this proxy binds.
+ * The single port this router binds.
  *
- * This used to be a text field, which made it possible for the listener,
- * the generated setup script, and the status line to disagree: typing a
- * port updated the script immediately but only moved the listener on the
- * next Start. A constant removes that entire class of mismatch, and keeps
- * the value reachable from pure JVM unit tests (no Context, no Activity,
- * no Service) so the setup script can still be tested.
+ * This used to be a text field, which made it possible for the listener
+ * and the status line to disagree: typing a port only moved the listener
+ * on the next Start. A constant removes that entire class of mismatch,
+ * and keeps the value reachable from pure JVM unit tests (no Context, no
+ * Activity, no Service).
  *
  * Deliberately a top-level const rather than something on ProxyService:
- * SetupScript is pure and is exercised by JVM tests that must not touch
- * Android classes.
+ * it is read from UI code and JVM tests that must not touch the service.
  *
  * 3129 is the only port this needs: one above the stable proxy's 3128
  * so both apps run side by side on the same device. (The host stack's

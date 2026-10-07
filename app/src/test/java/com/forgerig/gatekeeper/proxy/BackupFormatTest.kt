@@ -58,7 +58,7 @@ class BackupFormatTest {
             CredentialVault.decryptBackup("just some notes", "pw")
             fail("expected rejection")
         } catch (e: IllegalArgumentException) {
-            assertTrue(e.message!!.contains("not a network-proxy backup"))
+            assertTrue(e.message!!.contains("not a Forge Router backup"))
         }
     }
 
@@ -84,15 +84,19 @@ class BackupFormatTest {
             fail("expected rejection")
         } catch (e: IllegalArgumentException) {
             assertTrue(
-                e.message!!.contains("wrong password") || e.message!!.contains("not a network-proxy backup")
+                e.message!!.contains("wrong password") || e.message!!.contains("not a Forge Router backup")
             )
         }
     }
 
     @Test
     fun backupNameFilterMatchesOnlyOurFiles() {
-        assertTrue(CredentialVault.isBackupName("nanogatekeeper-backup-20260925-1052.txt"))
+        assertTrue(CredentialVault.isBackupName("forge-router-backup-20260925-1052.txt"))
         assertTrue(!CredentialVault.isBackupName("notes.txt"))
+        assertTrue(!CredentialVault.isBackupName("forge-router-backup-20260925-1052.bin"))
+        // Legacy prefix from the pre-rebrand app is still recognized, so
+        // old exports are offered on import instead of stranded.
+        assertTrue(CredentialVault.isBackupName("nanogatekeeper-backup-20260925-1052.txt"))
         assertTrue(!CredentialVault.isBackupName("nanogatekeeper-backup-20260925-1052.bin"))
     }
 

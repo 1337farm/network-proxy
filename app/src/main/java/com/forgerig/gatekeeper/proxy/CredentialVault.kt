@@ -95,7 +95,7 @@ object CredentialVault {
     /** Timestamped filename for Downloads exports. Pure (unit-tested). */
     fun backupFilename(nowMs: Long = System.currentTimeMillis()): String {
         val fmt = java.text.SimpleDateFormat("yyyyMMdd-HHmm", java.util.Locale.US)
-        return "nanogatekeeper-backup-" + fmt.format(java.util.Date(nowMs)) + ".txt"
+        return BACKUP_PREFIX + fmt.format(java.util.Date(nowMs)) + ".txt"
     }
 
     fun exportBackup(context: Context, password: String): String {
@@ -131,7 +131,7 @@ object CredentialVault {
     fun decryptBackup(blob: String, password: String): String {
         val clean = blob.trim().removePrefix("\uFEFF").trim()
         val parts = clean.split(":")
-        require(parts.size == 4 && parts[0] == "npbk1") { "not a network-proxy backup" }
+        require(parts.size == 4 && parts[0] == "npbk1") { "not a Forge Router backup" }
         // Everything from here on is inside the try: a truncated or
         // hand-edited salt/IV used to surface as a raw JDK message
         // ("Illegal base64 character ...") instead of our guidance.
@@ -156,9 +156,48 @@ object CredentialVault {
 
     /** Filenames this app writes into Downloads (unit-tested filter). */
     fun isBackupName(name: String): Boolean =
-        name.startsWith(BACKUP_PREFIX) && name.endsWith(".txt")
+        (name.startsWith(BACKUP_PREFIX) || name.startsWith(LEGACY_BACKUP_PREFIX)) &&
+            name.endsWith(".txt")
 
-    const val BACKUP_PREFIX = "nanogatekeeper-backup-"
+    const val BACKUP_PREFIX = "forge-router-backup-"
+
+    /** Prefix written by the pre-rebrand app; still recognized on import. */
+    const val LEGACY_BACKUP_PREFIX = "nanogatekeeper-backup-"
+
+    /**
+     * Newest backup file in Downloads, if any. Lets the import dialog open
+     * pre-filled with the latest export instead of an empty paste box.
+     * Matches our current prefix first, then the legacy one; newest
+     * modified wins. Null when Downloads holds no backup.
+     */
+    fun latestBackupUri(context: Context): android.net.Uri? {
+        return try {
+            val downloads = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            val projection = arrayOf(
+                android.provider.MediaStore.Downloads._ID,
+                android.provider.MediaStore.Downloads.DISPLAY_NAME
+            )
+            val selection =
+                "${android.provider.MediaStore.Downloads.DISPLAY_NAME} LIKE ? OR " +
+                    "${android.provider.MediaStore.Downloads.DISPLAY_NAME} LIKE ?"
+            val args = arrayOf("$BACKUP_PREFIX%.txt", "$LEGACY_BACKUP_PREFIX%.txt")
+            val sort = "${android.provider.MediaStore.Downloads.DATE_MODIFIED} DESC"
+            context.contentResolver.query(downloads, projection, selection, args, sort)?.use { c ->
+                val idCol = c.getColumnIndexOrThrow(android.provider.MediaStore.Downloads._ID)
+                val nameCol = c.getColumnIndexOrThrow(android.provider.MediaStore.Downloads.DISPLAY_NAME)
+                while (c.moveToNext()) {
+                    val name = c.getString(nameCol) ?: continue
+                    if (!isBackupName(name)) continue
+                    return android.content.ContentUris.withAppendedId(
+                        downloads, c.getLong(idCol)
+                    )
+                }
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     private fun pbkdf2(password: String, salt: ByteArray): SecretKey {
         val spec = javax.crypto.spec.PBEKeySpec(password.toCharArray(), salt, PBKDF2_ROUNDS, 256)
