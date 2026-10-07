@@ -34,7 +34,6 @@ class MainActivity : AppCompatActivity() {
     private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     private lateinit var viewModel: ProxyViewModel
-    private var setupScriptExpanded = false
     /** SAF picker target: the paste field of the open import dialog. */
     private var importPicker: ActivityResultLauncher<Intent>? = null
     private var notifPermissionLauncher: ActivityResultLauncher<String>? = null
@@ -110,18 +109,7 @@ class MainActivity : AppCompatActivity() {
 
         val startStopButton = findViewById<MaterialButton>(R.id.startStopButton)
         val exportButton = findViewById<MaterialButton>(R.id.exportButton)
-        val copyScriptButton = findViewById<MaterialButton>(R.id.copyScriptButton)
-        val setupScriptText = findViewById<TextView>(R.id.setupScriptText)
-        val setupScriptScrollView = findViewById<android.widget.ScrollView>(R.id.setupScriptScrollView)
-        val setupScriptExpandIcon = findViewById<ImageView>(R.id.setupScriptExpandIcon)
-        val setupScriptHeader = findViewById<android.view.View>(R.id.setupScriptHeader)
-        val copyCleanupButton = findViewById<MaterialButton>(R.id.copyCleanupButton)
-        val cleanupScriptText = findViewById<TextView>(R.id.cleanupScriptText)
-        val cleanupScriptScrollView = findViewById<android.widget.ScrollView>(R.id.cleanupScriptScrollView)
-        val cleanupScriptExpandIcon = findViewById<ImageView>(R.id.cleanupScriptExpandIcon)
-        val cleanupScriptHeader = findViewById<android.view.View>(R.id.cleanupScriptHeader)
-        var cleanupScriptExpanded = false
-        // Metrics + Decrypt-HTTPS are always on (no toggles by design).
+        // Metrics are always on (no toggle by design).
 
         // Verbose response logging: opt-in capture of response payloads
         // into the in-memory ResponseLog ring (ProxyService reads the
@@ -144,32 +132,6 @@ class MainActivity : AppCompatActivity() {
         // once. Skipped when already answered (or below API 33).
         ensureNotificationPermission()
 
-        // Static now that there is no port field to re-render from.
-        setupScriptText.text = SetupScript.build(this)
-        cleanupScriptText.text = SetupScript.cleanup()
-
-        val toggleExpand = {
-            setupScriptExpanded = !setupScriptExpanded
-            setupScriptScrollView.visibility = if (setupScriptExpanded) View.VISIBLE else View.GONE
-            setupScriptExpandIcon.setImageResource(
-                if (setupScriptExpanded) android.R.drawable.arrow_up_float else android.R.drawable.arrow_down_float
-            )
-        }
-
-        val toggleCleanupExpand = {
-            cleanupScriptExpanded = !cleanupScriptExpanded
-            cleanupScriptScrollView.visibility = if (cleanupScriptExpanded) View.VISIBLE else View.GONE
-            cleanupScriptExpandIcon.setImageResource(
-                if (cleanupScriptExpanded) android.R.drawable.arrow_up_float else android.R.drawable.arrow_down_float
-            )
-        }
-
-        // Header click expands/collapses
-        setupScriptHeader.setOnClickListener { toggleExpand() }
-        setupScriptExpandIcon.setOnClickListener { toggleExpand() }
-        cleanupScriptHeader.setOnClickListener { toggleCleanupExpand() }
-        cleanupScriptExpandIcon.setOnClickListener { toggleCleanupExpand() }
-
         // Observe running state (survives rotation via ViewModel).
         // isRunning is service-authoritative via the binder state callback.
         viewModel.isRunning.observe(this) { running ->
@@ -187,20 +149,6 @@ class MainActivity : AppCompatActivity() {
                 prefs().edit().putBoolean(KEY_SHOULD_RUN, true).apply()
                 viewModel.startProxy(PROXY_PORT, metricsEnabled = true)
             }
-        }
-
-        copyScriptButton.setOnClickListener {
-            val script = setupScriptText.text.toString()
-            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            cm.setPrimaryClip(ClipData.newPlainText("forge-router-setup", script))
-            Toast.makeText(this, "Setup script copied — paste it into your terminal", Toast.LENGTH_LONG).show()
-        }
-
-        copyCleanupButton.setOnClickListener {
-            val script = cleanupScriptText.text.toString()
-            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            cm.setPrimaryClip(ClipData.newPlainText("forge-router-cleanup", script))
-            Toast.makeText(this, "Cleanup script copied — paste it into your terminal", Toast.LENGTH_LONG).show()
         }
 
         exportButton.setOnClickListener {
@@ -294,7 +242,10 @@ class MainActivity : AppCompatActivity() {
             .setView(layout)
             .setPositiveButton("Save") { _, _ ->
                 val pid = ids[spinner.selectedItemPosition]
-                val sec = secret.text.toString().trim()
+                // Strip ALL whitespace, not just the ends: a wrapped paste
+                // smuggles interior newlines that OkHttp rejects at send
+                // time (dead connection, zero bytes back).
+                val sec = secret.text.toString().filterNot { it.isWhitespace() }
                 if (sec.isEmpty()) {
                     Toast.makeText(this, "Empty key — not saved", Toast.LENGTH_SHORT).show()
                     return@setPositiveButton
@@ -386,6 +337,15 @@ class MainActivity : AppCompatActivity() {
 
     /** Import dialog: load backup file (or paste) + password → validate → seal. */
     private fun showImportBackupDialog() {
+        // No file picked yet: offer the newest Downloads export (ours or the
+        // legacy prefix) so the dialog opens on a file, not an empty box.
+        // A SAF pick still wins: it overwrites these two on return.
+        if (pendingImportUri == null) {
+            CredentialVault.latestBackupUri(this)?.let { uri ->
+                pendingImportUri = uri
+                pendingImportName = displayName(uri)
+            }
+        }
         val picked = pendingImportUri
         val pickedName = pendingImportName
         val pw = textInput("Backup password", secret = true)
@@ -446,6 +406,25 @@ class MainActivity : AppCompatActivity() {
                 pendingImportName = null
             }
             .show()
+    }
+
+    /** LAN IP for the status line (loopback is always shown alongside). */
+    private fun lanIp(context: Context): String {
+        try {
+            val wifi = context.applicationContext.getSystemService(android.net.wifi.WifiManager::class.java)
+            val ip = wifi?.connectionInfo?.ipAddress ?: 0
+            if (ip != 0) {
+                return listOf(ip and 0xFF, ip shr 8 and 0xFF, ip shr 16 and 0xFF, ip shr 24 and 0xFF)
+                    .joinToString(".")
+            }
+        } catch (_: Exception) {}
+        try {
+            java.net.NetworkInterface.getNetworkInterfaces()?.toList()
+                ?.flatMap { it.inetAddresses.toList() }
+                ?.firstOrNull { !it.isLoopbackAddress && it.hostAddress?.contains(':') == false }
+                ?.let { return it.hostAddress ?: "" }
+        } catch (_: Exception) {}
+        return ""
     }
 
     /** Human filename for a picked document URI ("…-1052.txt"). */
@@ -921,7 +900,7 @@ class MainActivity : AppCompatActivity() {
             statusText.text = statusRunningLine(viewModel.proxyService.value?.uptimeMs() ?: 0L)
             statusText.setTextColor(running)
             statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(running)
-            val lan = SetupScript.lanIp(this)
+            val lan = lanIp(this)
             portText.text = if (lan.isNotBlank()) "127.0.0.1:$PROXY_PORT • LAN $lan:$PROXY_PORT"
                 else "127.0.0.1:$PROXY_PORT"
             portText.visibility = View.VISIBLE

@@ -49,7 +49,9 @@ class ProviderStore private constructor() {
         companion object {
             fun fromJson(o: JSONObject) = ApiKey(
                 o.getString("id"), o.optString("label", ""),
-                o.getString("secret"), o.optBoolean("enabled", true),
+                // Pasted secrets arrive with stray whitespace (wrapped lines);
+                // normalize on load so imports heal the same way live entry does.
+                o.getString("secret").filterNot { it.isWhitespace() }, o.optBoolean("enabled", true),
                 o.optInt("failures", 0), o.optLong("cooledUntilMs", 0),
                 o.optInt("dayHits", 0), o.optString("dayBucket", ""),
                 o.optLong("dayLimitUntilMs", 0), o.optInt("streak429", 0)
@@ -458,8 +460,15 @@ class ProviderStore private constructor() {
     }
 
     /** Header value to inject for [provider] using [key] (scheme-aware). */
-    fun authValue(provider: Provider, key: ApiKey): String =
-        if (provider.authScheme.isNotEmpty()) provider.authScheme + key.secret else key.secret
+    fun authValue(provider: Provider, key: ApiKey): String {
+        // Secrets are pasted by hand: wrapped lines smuggle interior
+        // newlines past end-trimming, and OkHttp rejects the header with
+        // IllegalArgumentException (zero-byte response, dead connection).
+        // API keys never legitimately contain whitespace, so strip all of
+        // it here: this also heals keys stored dirty by older builds.
+        val clean = key.secret.filterNot { it.isWhitespace() }
+        return if (provider.authScheme.isNotEmpty()) provider.authScheme + clean else clean
+    }
 
     fun summary(): String {
         if (providers.isEmpty()) return "no providers configured"

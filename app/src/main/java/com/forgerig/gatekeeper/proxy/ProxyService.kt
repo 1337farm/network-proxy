@@ -542,7 +542,6 @@ class ProxyService : Service() {
                 }
             }
 
-            val reqHeaders = headers.toHeaders()
             val mediaType = "application/octet-stream".toMediaType()
             var attempt = 0
             val policy = RetryPolicy(maxRetries = 5, baseBackoffMs = 2_000)
