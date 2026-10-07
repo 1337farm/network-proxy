@@ -422,11 +422,13 @@ class ProviderStore private constructor() {
         val p = providers[providerId] ?: return
         val key = p.keys.find { it.id == keyId } ?: return
         when (statusCode) {
-            401, 403 -> {
+            401 -> {
+                // Wrong/revoked key: stays dead until the owner re-enables
+                // it in Manage Keys. Only 401 is certain enough to brick.
                 key.enabled = false
                 key.failures++
                 key.streak429 = 0
-                ProxyMetrics.eventWarning("Key '${key.label}' disabled (HTTP $statusCode)")
+                ProxyMetrics.eventWarning("Key '${key.label}' disabled (HTTP 401)")
             }
             429 -> {
                 key.streak429++
@@ -444,7 +446,11 @@ class ProviderStore private constructor() {
                     "Key '${key.label}' 429×${key.streak429} cooling ${cd / 1000}s, rolled over"
                 )
             }
-            503, in 500..599 -> {
+            403, 503, in 500..599 -> {
+                // Forbidden may be the edge/WAF rather than the key (a
+                // Cloudflare 403 bricked two good keys), so cool down and
+                // recover instead of disabling. Genuinely wrong-scoped keys
+                // can still be switched off in Manage Keys.
                 key.streak429 = 0
                 var cd = coolDownMs / 2
                 if (retryAfterSecs != null && retryAfterSecs > 0) {

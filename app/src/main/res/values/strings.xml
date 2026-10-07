@@ -17,6 +17,7 @@
     <string name="providers_title">Providers &amp; keys</string>
     <string name="providers_hint">Providers are built in — just add keys. The router injects the active key per provider and rolls over on 429/401. Secrets stay encrypted on-device.</string>
     <string name="add_key">Add key</string>
+    <string name="manage_keys">Manage keys</string>
     <string name="export_backup">Export backup</string>
     <string name="import_backup">Import backup</string>
     <string name="events_title">Recent events</string>
