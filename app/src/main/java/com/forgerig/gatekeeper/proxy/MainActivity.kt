@@ -180,6 +180,7 @@ class MainActivity : AppCompatActivity() {
 
         refreshProvidersSummary()
         findViewById<MaterialButton>(R.id.addKeyButton)?.setOnClickListener { showAddKeyDialog() }
+        findViewById<MaterialButton>(R.id.manageKeysButton)?.setOnClickListener { showManageKeysDialog() }
         findViewById<MaterialButton>(R.id.exportBackupButton)?.setOnClickListener { showExportBackupDialog() }
         findViewById<MaterialButton>(R.id.importBackupButton)?.setOnClickListener { showImportBackupDialog() }
     }
@@ -263,6 +264,100 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Key sealed for $pid", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /**
+     * Manage-keys dialog: every provider's keys with an on/off switch and
+     * delete. Keys the router auto-disabled (HTTP 401) or cooled down are
+     * re-enabled here — there is no other path back. Changes save
+     * immediately and refresh the summary.
+     */
+    private fun showManageKeysDialog() {
+        val store = ProviderBroker.store(this)
+        val ids = store.providers.keys.sorted()
+        if (ids.isEmpty()) {
+            Toast.makeText(this, "No providers configured", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val list = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+        val now = System.currentTimeMillis()
+        fun statusOf(key: ProviderStore.ApiKey): String = when {
+            !key.enabled -> "off"
+            key.cooledUntilMs > now -> "cooling ${(key.cooledUntilMs - now + 999) / 1000}s"
+            key.dayLimitUntilMs > now -> "day-limited"
+            else -> "live"
+        }
+        for (pid in ids) {
+            val provider = store.providers[pid] ?: continue
+            list.addView(android.widget.TextView(this).apply {
+                text = pid
+                textSize = 14f
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setPadding(0, 24, 0, 4)
+            })
+            if (provider.keys.isEmpty()) {
+                list.addView(android.widget.TextView(this).apply {
+                    text = "  (no keys)"
+                    textSize = 13f
+                })
+            }
+            // Snapshot: rows mutate the list while iterating on delete.
+            for (key in provider.keys.toList()) {
+                val row = android.widget.LinearLayout(this).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setPadding(0, 4, 0, 4)
+                }
+                val label = android.widget.TextView(this).apply {
+                    text = "${key.label.ifBlank { key.id.take(8) }}  ·  ${statusOf(key)}"
+                    textSize = 13f
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        0, android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+                    )
+                }
+                val toggle = com.google.android.material.switchmaterial.SwitchMaterial(this).apply {
+                    isChecked = key.enabled
+                    setOnCheckedChangeListener { _, on ->
+                        key.enabled = on
+                        if (on) {
+                            key.cooledUntilMs = 0
+                            key.dayLimitUntilMs = 0
+                        }
+                        ProviderBroker.save(this@MainActivity, store)
+                        refreshProvidersSummary()
+                        label.text = "${key.label.ifBlank { key.id.take(8) }}  ·  ${statusOf(key)}"
+                    }
+                }
+                val del = com.google.android.material.button.MaterialButton(this).apply {
+                    text = "✕"
+                    setOnClickListener {
+                        androidx.appcompat.app.AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Delete key '${key.label}'?")
+                            .setMessage("The router stops using it immediately. This cannot be undone (export a backup first).")
+                            .setPositiveButton("Delete") { _, _ ->
+                                provider.keys.removeAll { it.id == key.id }
+                                ProviderBroker.save(this@MainActivity, store)
+                                refreshProvidersSummary()
+                                (row.parent as? android.view.ViewGroup)?.removeView(row)
+                            }
+                            .setNegativeButton("Cancel", null)
+                            .show()
+                    }
+                }
+                row.addView(label)
+                row.addView(toggle)
+                row.addView(del)
+                list.addView(row)
+            }
+        }
+        val scroll = android.widget.ScrollView(this).apply { addView(list) }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Manage keys")
+            .setView(scroll)
+            .setPositiveButton("Done", null)
             .show()
     }
 
