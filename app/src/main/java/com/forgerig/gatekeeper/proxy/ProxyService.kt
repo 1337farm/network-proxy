@@ -626,6 +626,12 @@ class ProxyService : Service() {
             var finalCode = -1
             var transferredTotal = 0L
             var keyRounds = 0
+            // Set the moment the status line goes to the client. After that
+            // point a retry would emit a SECOND status line on the same
+            // connection (corrupt) or re-hit upstream for a client that is
+            // already gone (burns billed calls), so the catch path below
+            // must only roll/retry before it flips.
+            var responded = false
             // Cap covers same-provider keys plus route-leg failovers.
             val maxKeyRounds = ((provider?.keys?.size ?: 0) + 4).coerceAtLeast(2)
             keyLoop@ while (true) {
@@ -668,9 +674,10 @@ class ProxyService : Service() {
                             "HTTP $preCode on '${kc.second.label}' → rolling"
                         )
                         keyRounds++
-                        val next = nextUsableKey(
+                        val next = Failover.nextUsableKey(
                             store, provider, kc.second.id, routeLeg,
-                            body, targetUrl, headers, mutableHeaders
+                            body, targetUrl, headers, mutableHeaders,
+                            onEvent = { ProxyMetrics.event(it) }
                         )
                         if (next != null) {
                             keyCtx = next.key
@@ -707,9 +714,11 @@ class ProxyService : Service() {
                             else ModelHealth.recordErr(p.id, m)
                         }
                         val action = ScenarioClassifier.toRetryAction(scenario)
-                        if (action == RetryAction.RETRY_WITH_BACKOFF && policy.shouldRetry(attempt)) {
+                        if (action == RetryAction.RETRY_WITH_BACKOFF && policy.shouldRetry(attempt) &&
+                            !Failover.deadlineExceeded(startedAt)
+                        ) {
                             val retryAfter = r.headers["Retry-After"]?.toLongOrNull()
-                            val delayMs = retryAfter?.times(1000) ?: policy.nextDelay(attempt)
+                            val delayMs = Failover.cappedRetryDelay(retryAfter, attempt, policy)
                             if (metricsEnabled) {
                                 ProxyMetrics.recordRetry(sessionId, requestId, attempt, scenario, delayMs)
                                 ProxyMetrics.event("Retry #$attempt ${scenario.name} ${host} backoff=${delayMs}ms")
@@ -733,6 +742,7 @@ class ProxyService : Service() {
                         } else null
                         val statusLine = "HTTP/1.1 ${r.code} ${r.message}\r\n"
                         output.write(statusLine.toByteArray())
+                        responded = true
                         for ((key, values) in trimHeaders(r.headers.toMultimap(), gunzip)) {
                             for (value in values) {
                                 output.write("$key: $value\r\n".toByteArray())
@@ -818,10 +828,58 @@ SessionTracker.noteUsage(sessionId, found)
                         return
                     } ?: return
                 } catch (e: Exception) {
+                    if (responded || socket.isClosed) {
+                        // Forwarding already started (or the client is gone):
+                        // never retry — a second status line would corrupt the
+                        // stream, and re-hitting upstream for a dead client
+                        // burns billed calls. Metrics close out in `finally`.
+                        return
+                    }
+                    // Connection-level failure before anything was forwarded:
+                    // roll the key (same as an HTTP 5xx) instead of hammering
+                    // the same dead host, so a down provider fails over to
+                    // the next key/leg instead of retrying it five times.
+                    val kc = keyCtx
+                    if (kc != null && provider != null && store.keyRolloverEnabled &&
+                        keyRounds + 1 < maxKeyRounds
+                    ) {
+                        store.reportError(provider.id, kc.second.id)
+                        ModelHealth.recordErr(provider.id, modelOf(body))
+                        SessionTracker.noteEvent(
+                            sessionId,
+                            "upstream ${e.javaClass.simpleName} on '${kc.second.label}' → rolling"
+                        )
+                        keyRounds++
+                        val next = Failover.nextUsableKey(
+                            store, provider, kc.second.id, routeLeg,
+                            body, targetUrl, headers, mutableHeaders,
+                            onEvent = { ProxyMetrics.event(it) }
+                        )
+                        if (next != null) {
+                            keyCtx = next.key
+                            routeLeg = next.leg
+                            targetUrl = next.url
+                            body = next.body
+                            SessionTracker.note(
+                                sessionId, next.key.first.id, next.key.second.label,
+                                modelOf(body), LlmPolicy.extractHost(targetUrl)
+                            )
+                            mutableHeaders.keys.filter {
+                                it.equals("x-api-key", true) || it.equals("authorization", true)
+                            }.forEach { mutableHeaders.remove(it) }
+                            mutableHeaders[next.key.first.authHeader] =
+                                store.authValue(next.key.first, next.key.second)
+                            attempt = 0
+                            continue@keyLoop
+                        }
+                    }
                     val scenario = ScenarioClassifier.classifyError(e)
                     val action = ScenarioClassifier.toRetryAction(scenario)
-                    if ((action == RetryAction.RETRY_WITH_BACKOFF || action == RetryAction.RETRY_IMMEDIATE) && policy.shouldRetry(attempt)) {
-                        val delayMs = if (action == RetryAction.RETRY_IMMEDIATE) 0 else policy.nextDelay(attempt)
+                    if ((action == RetryAction.RETRY_WITH_BACKOFF || action == RetryAction.RETRY_IMMEDIATE) &&
+                        policy.shouldRetry(attempt) && !Failover.deadlineExceeded(startedAt)
+                    ) {
+                        val delayMs = if (action == RetryAction.RETRY_IMMEDIATE) 0
+                        else Failover.cappedRetryDelay(null, attempt, policy)
                         if (metricsEnabled) ProxyMetrics.recordRetry(sessionId, requestId, attempt, scenario, delayMs)
                         attempt++
                         if (delayMs > 0) Thread.sleep(delayMs)
@@ -1342,100 +1400,9 @@ SessionTracker.noteUsage(sessionId, found)
     }
 
 
-    // ---- Key-broker helpers ----
-    private data class NextKey(
-        val key: Pair<ProviderStore.Provider, ProviderStore.ApiKey>,
-        val leg: ProviderStore.RouteLeg?,
-        val url: String,
-        val body: ByteArray?
-    )
-
-    /**
-     * Next usable credential: prefer a sibling key on the same provider,
-     * else fail over to the next healthy leg of our custom route (rewriting
-     * model + URL + content-length). Null when nothing is usable.
-     */
-    private fun nextUsableKey(
-        store: ProviderStore,
-        provider: ProviderStore.Provider,
-        failedKeyId: String,
-        leg: ProviderStore.RouteLeg?,
-        body: ByteArray?,
-        url: String,
-        headers: MutableMap<String, String>,
-        mutableHeaders: MutableMap<String, String>
-    ): NextKey? {
-        val same = store.activeKey(provider.id)
-        if (same != null && same.second.id != failedKeyId) {
-            return NextKey(same, leg, url, body)
-        }
-        // Same-provider pool exhausted — walk route legs after the current one.
-        // (Skipped entirely without a leg context; spillover below covers it.)
-        if (leg != null && body != null) {
-            val wantModel = try {
-                org.json.JSONObject(body.toString(Charsets.UTF_8)).optString("model", "")
-            } catch (_: Exception) { null }
-            val route = if (wantModel != null) {
-                store.routes.values.firstOrNull { r ->
-                    r.legs.any { it.providerId == leg.providerId && it.model == leg.model }
-                }
-            } else null
-            if (route != null) {
-                val idx = route.legs.indexOfFirst { it.providerId == leg.providerId && it.model == leg.model }
-                for (next in route.legs.drop(idx + 1)) {
-                    val lp = store.providers[next.providerId] ?: continue
-                    val lk = store.activeKey(lp.id)?.second ?: continue
-                    try {
-                        val bj = org.json.JSONObject(body.toString(Charsets.UTF_8))
-                        bj.put("model", next.model)
-                        val nb = bj.toString().toByteArray(Charsets.UTF_8)
-                        val nu = ProviderStore.retarget(url, lp.baseUrl)
-                        headers["Content-Length"] = nb.size.toString()
-                        mutableHeaders["Content-Length"] = nb.size.toString()
-                        ProxyMetrics.event("Leg failover '$wantModel' → ${lp.id}/${next.model}")
-                        return NextKey(lp to lk, next, nu, nb)
-                    } catch (_: Exception) { continue }
-                }
-            }
-        }
-        // Cross-provider spillover (no route config needed): best
-        // comparable model on a same-family provider, retargeted URL.
-        // Lets Zen-exhausted traffic spill to OpenRouter/etc. mid-keyLoop.
-        val failedModel = body?.let { modelOf(it) } ?: ""
-        store.spilloverTarget(provider.id, failedModel, failedKeyId)?.let { sel ->
-            var nb = body
-            if (sel.model.isNotBlank() && body != null) {
-                try {
-                    val bj = org.json.JSONObject(body.toString(Charsets.UTF_8))
-                    bj.put("model", sel.model)
-                    nb = bj.toString().toByteArray(Charsets.UTF_8)
-                } catch (_: Exception) { /* keep original body */ }
-            }
-            val nu = ProviderStore.retarget(url, sel.provider.baseUrl)
-            val len = (nb?.size ?: 0).toString()
-            headers["Content-Length"] = len
-            mutableHeaders["Content-Length"] = len
-            ProxyMetrics.event(
-                "Spillover '${provider.id}' → '${sel.provider.id}/${sel.model}' (tier ${sel.tier})"
-            )
-            return NextKey(sel.provider to sel.key, null, nu, nb)
-        }
-        // Full circle: any usable key on the ORIGINAL provider (cooldowns may differ).
-        val retry = store.activeKey(provider.id)
-        return if (retry != null && retry.second.id != failedKeyId) {
-            NextKey(retry, leg, url, body)
-        } else null
-    }
 
     /** Top-level "model" field of a JSON API body ("" when absent/opaque). */
-    private fun modelOf(body: ByteArray?): String {
-        if (body == null) return ""
-        return try {
-            org.json.JSONObject(body.toString(Charsets.UTF_8)).optString("model", "")
-        } catch (_: Exception) {
-            ""
-        }
-    }
+    private fun modelOf(body: ByteArray?): String = Failover.modelOf(body)
 
     /**
      * Verbose response payload logging toggle, shared with the dashboard

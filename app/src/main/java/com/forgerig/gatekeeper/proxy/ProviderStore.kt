@@ -465,6 +465,23 @@ class ProviderStore private constructor() {
         }
     }
 
+    /** Connection-level failure (no HTTP status): cool the key like a 5xx,
+     *  so the next request skips the dead host instead of re-burning a
+     *  connect timeout on it. Never disables: DNS blips hit every key
+     *  alike, and cooldowns self-heal. */
+    @Synchronized
+    fun reportError(providerId: String, keyId: String) {
+        val p = providers[providerId] ?: return
+        val key = p.keys.find { it.id == keyId } ?: return
+        key.streak429 = 0
+        key.cooledUntilMs = System.currentTimeMillis() + coolDownMs / 2
+        key.failures++
+        p.cursor++
+        ProxyMetrics.eventWarning(
+            "Key '${key.label}' cooling ${coolDownMs / 2000}s (connection error), rolled over"
+        )
+    }
+
     /** Header value to inject for [provider] using [key] (scheme-aware). */
     fun authValue(provider: Provider, key: ApiKey): String {
         // Secrets are pasted by hand: wrapped lines smuggle interior
