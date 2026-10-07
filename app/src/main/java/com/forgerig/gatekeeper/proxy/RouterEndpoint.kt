@@ -1,46 +1,23 @@
 package com.forgerig.gatekeeper.proxy
 
 /**
- * Pure routing logic for the curl-able local CA endpoint (`GET /ca.pem`).
+ * Pure routing logic for the router-local endpoints (currently
+ * `GET /endpoint-cert.pem`, which serves the pinned TLS certificate).
  *
  * Kept free of Android dependencies so it runs under plain JVM unit tests.
- * [ProxyService] delegates to this; the endpoint is only served when the
- * request is addressed at THIS proxy (loopback host), never for upstream
- * URLs that merely end in `/ca.pem`.
+ * [ProxyService] delegates to this; an endpoint is only served when the
+ * request is addressed at THIS router (loopback host), never for upstream
+ * URLs that merely share the path.
  */
-object CaEndpoint {
-
-    /**
-     * True for requests addressed at this proxy asking for the CA.
-     *
-     * [peerIsLoopback] is mandatory. It used to be the only thing keeping
-     * the CA private, back when the listener bound 0.0.0.0 and any host on
-     * the LAN could `GET /ca.pem`. The listener is loopback-only now, so
-     * there is no remote peer to exclude -- but the check stays, because it
-     * is a second independent guard on a secret and costs nothing. Do not
-     * drop it on the grounds that the bind address already covers it.
-     */
-    fun isLocalCaRequest(target: String, peerIsLoopback: Boolean = true): Boolean {
-        if (!peerIsLoopback) return false
-        val path = pathOf(target) ?: return false
-        if (path != "/ca.pem") return false
-        if (target.startsWith("/")) return true
-        return try {
-            val host = java.net.URI(target).host?.lowercase() ?: return false
-            host == "127.0.0.1" || host == "localhost" || host == "0.0.0.0" ||
-                host == "::1" || host == "[::1]"
-        } catch (_: Exception) {
-            false
-        }
-    }
+object RouterEndpoint {
 
     /**
      * True for a request asking us to hand back the endpoint certificate.
      *
-     * Same gate as [isLocalCaRequest]: loopback callers only. The endpoint
-     * certificate is not a secret in the way the MITM CA is, but publishing it
-     * is still only ever something this device's own client should do, and the
-     * check costs nothing.
+     * [peerIsLoopback] is mandatory: the listener is loopback-only, so
+     * there is no remote peer to exclude -- but the check stays as a second
+     * independent guard, because it costs nothing. Do not drop it on the
+     * grounds that the bind address already covers it.
      */
     fun isLocalEndpointCertRequest(target: String, peerIsLoopback: Boolean = true): Boolean {
         if (!peerIsLoopback) return false

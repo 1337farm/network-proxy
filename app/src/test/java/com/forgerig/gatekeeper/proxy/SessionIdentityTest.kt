@@ -47,7 +47,7 @@ class SessionIdentityTest {
 
     @Test
     fun idSurvivesAnHttpRequestHead() {
-        // A tapped MITM request/response starts with the head; the id is
+        // A tapped request/response starts with the head; the id is
         // in the body past CRLFCRLF.
         val raw = bytes(
             "POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\n" +

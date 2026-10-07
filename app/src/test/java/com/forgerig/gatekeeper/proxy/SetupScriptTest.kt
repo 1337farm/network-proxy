@@ -1,18 +1,21 @@
 package com.forgerig.gatekeeper.proxy
 
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * Guards the emitted setup script (see SetupScript.scriptFor):
  * pure ASCII (no em-dashes/smart-quotes/arrows that proot locales mangle
- * on paste), bash-parseable, and non-fatal when the proxy is down.
+ * on paste), bash-parseable, and non-fatal when the router is down.
+ *
+ * There is no MITM anymore: the script wires proxy env, fetches the
+ * router's pinned endpoint certificate for TLS front-door clients, and
+ * touches no trust store anywhere.
  */
 class SetupScriptTest {
 
-    private fun rendered(port: Int = 3128): String = SetupScript.scriptFor(port)
+    private fun rendered(port: Int = PROXY_PORT): String = SetupScript.scriptFor(port)
 
     @Test
     fun emittedScriptIsPureAscii() {
@@ -38,131 +41,97 @@ class SetupScriptTest {
         val script = rendered()
         // Probe line must tolerate refusal: `|| echo ...` on the SAME
         // logical line (trailing backslash would split it into a lone `\`).
-        val probe = script.lines().first { "proxy probe: listening" in it }
+        val probe = script.lines().first { "router probe: listening" in it }
         assertTrue("probe must chain a fallback: $probe", probe.trimEnd().endsWith("|| \\"))
         val fallback = script.lines()[script.lines().indexOf(probe) + 1]
         assertTrue("fallback must echo, not traceback: $fallback", fallback.trimStart().startsWith("echo "))
     }
 
     @Test
-    fun staleCaFallsBackToOpaqueTunnelMessage() {
+    fun noMitmRemnants() {
+        // No CA fetch, no bundles, no trust-store writes, no proot fan-out:
+        // the TLS front door pins the endpoint cert instead.
         val script = rendered()
-        assertTrue(script.contains("tunneled opaque (no MITM)"))
-        assertEquals(1, script.lines().count { "MITM CA not found" in it })
+        for (banned in listOf(
+            "/ca.pem", "MITM", "bundle.pem",
+            "update-ca-certificates", "ca-certificates", "NODE_EXTRA_CA_CERTS",
+            "SSL_CERT_FILE", "GIT_SSL_CAINFO", "IS_TERMUX", "installed-rootfs"
+        )) {
+            assertFalse("MITM remnant still emitted: '$banned'", banned in script)
+        }
+        assertTrue(script.contains("BEGIN CERTIFICATE"))
     }
 
     @Test
-    fun caTrustExportsLiveInAboveGuardBlock() {
-        // Regression: the CA trust exports were appended BELOW the PS1
-        // guard, so non-interactive shells (opencode serve via
-        // opencode-start) never saw them -> "self-signed certificate in
-        // certificate chain" on every MITM split. They must be part of
-        // the above-guard managed block the bashrc python step writes.
+    fun endpointCertIsFetchedForPinning() {
         val script = rendered()
-        val bashrcStep = script.substringAfter("python3 - \"3128\" ~/.bashrc")
+        assertTrue(script.contains("/endpoint-cert.pem"))
+        assertTrue(script.contains(".config/forge-router/endpoint-cert.pem"))
+        assertTrue(script.contains("FORGE_ROUTER_CERT="))
+    }
+
+    @Test
+    fun certExportLivesInAboveGuardBlock() {
+        // Non-interactive shells (opencode serve via opencode-start) only
+        // see the above-guard managed block, so the cert path export must
+        // be part of it.
+        val script = rendered()
+        val bashrcStep = script.substringAfter("python3 - \"$PROXY_PORT\" ~/.bashrc")
         assertTrue(
-            "SSL_CERT_FILE must be in the above-guard block",
-            bashrcStep.contains("export SSL_CERT_FILE=")
-        )
-        assertTrue(
-            "REQUESTS_CA_BUNDLE must be in the above-guard block",
-            bashrcStep.contains("export REQUESTS_CA_BUNDLE=")
-        )
-        assertTrue(
-            "NODE_EXTRA_CA_CERTS must be in the above-guard block",
-            bashrcStep.contains("export NODE_EXTRA_CA_CERTS=")
-        )
-        assertTrue(
-            "CURL_CA_BUNDLE must be in the above-guard block (curl/openssl clients)",
-            bashrcStep.contains("export CURL_CA_BUNDLE=")
-        )
-        assertTrue(
-            "GIT_SSL_CAINFO must be in the above-guard block (git via proxy MITM)",
-            bashrcStep.contains("export GIT_SSL_CAINFO=")
-        )
-        // ...and must NOT be appended below the guard anymore.
-        val appendIdx = script.indexOf("cat >> ~/.bashrc")
-        assertTrue(
-            "no below-guard CA append may remain (opencode-start never sees it)",
-            appendIdx == -1 || !script.substring(appendIdx).contains("network-proxy-ca")
+            "FORGE_ROUTER_CERT must be in the above-guard block",
+            bashrcStep.contains("export FORGE_ROUTER_CERT=")
         )
     }
 
     @Test
-    fun bashrcStepStripsStaleBelowGuardCaBlock() {
-        // Upgrades from the old layout leave a orphan CA block below the
-        // guard; the python step must remove it so trust lives in one
-        // place (above the guard).
+    fun managedMarkersAreRouterScoped() {
+        // The stable proxy's script owns the network-proxy markers; ours
+        // must not claim them, or the two scripts overwrite each other's
+        // terminal wiring.
         val script = rendered()
+        assertTrue(script.contains("begin = \"# >>> forge-router (managed) >>>\""))
         assertTrue(
-            script.contains("network-proxy-ca (managed)")
+            "must not emit stable-app markers as our own block",
+            script.lines().none { it.trim() == "begin = \"# >>> network-proxy (managed) >>>\"" }
         )
+    }
+
+    @Test
+    fun legacyForgeVariantBlockIsStrippedButStableSurvives() {
+        // The short-lived #73 build wrote network-proxy blocks carrying
+        // :3129; the new script removes those while leaving a stable
+        // :3128 block (the other app's) untouched.
+        val script = rendered()
+        assertTrue(script.contains("legacy_begin"))
+        assertTrue(script.contains("\"3129\""))
+        assertTrue(script.contains("belongs to the other app"))
     }
 
     @Test
     fun bashrcStepConvergesWithoutRewrite() {
-        // The unified block (proxy + CA exports) must short-circuit with
+        // The unified block (router + cert exports) must short-circuit with
         // SystemExit(0): re-running must print the idempotent-skip line,
         // never "above PS1 guard" again (that message means a rewrite).
         val script = rendered()
-        val step = script.substringAfter("python3 - \"3128\" ~/.bashrc")
+        val step = script.substringAfter("python3 - \"$PROXY_PORT\" ~/.bashrc")
         assertTrue(step.contains("idempotent skip"))
         assertTrue(step.contains("raise SystemExit(0)"))
     }
 
     @Test
-    fun termuxProotFanoutSection() {
-        // Pasted in Termux, the script must detect the environment and
-        // push the CA into every Ubuntu proot distro (plus itself).
-        val script = rendered()
-        assertTrue(script.contains("IS_TERMUX=0"))
-        assertTrue(script.contains("uname -o"))
-        assertTrue(script.contains("ID=ubuntu"))
-        assertTrue(script.contains("installed-rootfs"))
-        assertTrue(script.contains("network-proxy-ca.crt"))
-        assertTrue(script.contains("update-ca-certificates"))
-    }
-
-    @Test
-    fun prootFanoutIsReachableAndOnlyRunsInTermux() {
-        // Substring presence alone would pass if the block were stranded in
-        // an unreachable branch, so assert the structure around it.
-        val script = rendered()
-        val termuxDetect = script.indexOf("IS_TERMUX=1; fi")
-        val ubuntuOverride = script.indexOf("ID=ubuntu")
-        val fanout = script.indexOf("installed-rootfs")
-        assertTrue("Termux detection missing", termuxDetect > 0)
-        assertTrue("no fan-out after the Termux detection", fanout > termuxDetect)
-        // $PREFIX leaks into proot, so the Ubuntu os-release check has to
-        // run AFTER detection and clear the flag again.
-        assertTrue(
-            "Ubuntu os-release must clear the Termux guess",
-            ubuntuOverride > termuxDetect &&
-                script.substring(ubuntuOverride, script.indexOf('\n', ubuntuOverride)).contains("IS_TERMUX=0")
-        )
-        // Inside the branch, guarded on a non-empty CA file.
-        val guarded = script.substring(termuxDetect, fanout)
-        assertTrue("fan-out must be guarded on a non-empty CA file", guarded.contains("-s \"\$CA_PEM\""))
-    }
-
-    @Test
-    fun foundFlagOnlySetAfterASuccessfulCopy() {
-        // FOUND=1 before the cp would report success for a rootfs the CA
-        // never reached (storage permission), hiding the failure.
-        val script = rendered()
-        val cpIdx = script.indexOf("network-proxy-ca.crt\" 2>/dev/null; then")
-        val foundIdx = script.indexOf("FOUND=1", cpIdx)
-        assertTrue("cp-then-FOUND order not found", cpIdx > 0 && foundIdx > cpIdx)
-    }
-
-    @Test
-    fun prootNoteNoLongerClaimsEnvVarsAreBlocked() {
-        // proot-distro logins inherit the parent env, so the old "env vars
-        // do NOT cross into proot" line sent users to re-paste forever.
-        val script = rendered()
+    fun cleanupIsScopedToThisRouter() {
+        // The cleanup must only remove forge-router blocks and our own
+        // port's exports: wiping the stable app's :3128 wiring would take
+        // down the other router.
+        val script = SetupScript.cleanup()
+        assertTrue(script.contains("forge-router"))
         assertFalse(
-            "stale env-var claim still present",
-            script.contains("do NOT cross") || script.contains("do not cross the proot")
+            "cleanup must not match stable-app markers",
+            script.contains("# >>> network-proxy")
+        )
+        assertTrue(
+            "bare-export strip must be port-scoped",
+            script.contains("(\"127.0.0.1:\" + port) in s")
         )
     }
 }

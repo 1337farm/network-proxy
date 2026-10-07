@@ -63,12 +63,12 @@ class MainActivity : AppCompatActivity() {
             if (granted) {
                 // Re-post so the drawer shows it immediately.
                 viewModel.ensureRunning(
-                    PROXY_PORT, metricsEnabled = true, mitmEnabled = true
+                    PROXY_PORT, metricsEnabled = true
                 )
             } else {
                 Toast.makeText(
                     this,
-                    "Notifications are blocked — you won't see the proxy status until allowed in Settings.",
+                    "Notifications are blocked — you won't see the router status until allowed in Settings.",
                     Toast.LENGTH_LONG
                 ).show()
             }
@@ -136,7 +136,7 @@ class MainActivity : AppCompatActivity() {
         // Auto-start: ensure the proxy is running on app start unless the
         // user explicitly stopped it (Stop persists the opt-out).
         if (savedInstanceState == null && prefs().getBoolean(KEY_SHOULD_RUN, true)) {
-            viewModel.ensureRunning(PROXY_PORT, metricsEnabled = true, mitmEnabled = true)
+            viewModel.ensureRunning(PROXY_PORT, metricsEnabled = true)
         }
 
         // The "proxy is running" notification is the only way to see the
@@ -185,28 +185,21 @@ class MainActivity : AppCompatActivity() {
                 viewModel.stopProxy()
             } else {
                 prefs().edit().putBoolean(KEY_SHOULD_RUN, true).apply()
-                if (!MitmCa.caCertFile(this).exists()) {
-                    Toast.makeText(
-                        this,
-                        "MITM CA unavailable — starting opaque",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-                viewModel.startProxy(PROXY_PORT, metricsEnabled = true, mitmEnabled = true)
+                viewModel.startProxy(PROXY_PORT, metricsEnabled = true)
             }
         }
 
         copyScriptButton.setOnClickListener {
             val script = setupScriptText.text.toString()
             val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            cm.setPrimaryClip(ClipData.newPlainText("opencode-proxy-setup", script))
+            cm.setPrimaryClip(ClipData.newPlainText("forge-router-setup", script))
             Toast.makeText(this, "Setup script copied — paste it into your terminal", Toast.LENGTH_LONG).show()
         }
 
         copyCleanupButton.setOnClickListener {
             val script = cleanupScriptText.text.toString()
             val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            cm.setPrimaryClip(ClipData.newPlainText("opencode-proxy-cleanup", script))
+            cm.setPrimaryClip(ClipData.newPlainText("forge-router-cleanup", script))
             Toast.makeText(this, "Cleanup script copied — paste it into your terminal", Toast.LENGTH_LONG).show()
         }
 
@@ -223,7 +216,7 @@ class MainActivity : AppCompatActivity() {
                     putExtra(Intent.EXTRA_STREAM, uri)
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
-                startActivity(Intent.createChooser(share, "Share proxy metrics"))
+                startActivity(Intent.createChooser(share, "Share router metrics"))
                 Toast.makeText(this, "Metrics saved: ${file.name}", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 Toast.makeText(this, "Export failed: ${e.message}", Toast.LENGTH_LONG).show()
@@ -241,7 +234,6 @@ class MainActivity : AppCompatActivity() {
         findViewById<MaterialButton>(R.id.addKeyButton)?.setOnClickListener { showAddKeyDialog() }
         findViewById<MaterialButton>(R.id.exportBackupButton)?.setOnClickListener { showExportBackupDialog() }
         findViewById<MaterialButton>(R.id.importBackupButton)?.setOnClickListener { showImportBackupDialog() }
-        findViewById<MaterialButton>(R.id.exportCaButton)?.setOnClickListener { shareMitmCa() }
     }
 
     private fun refreshProvidersSummary() {
@@ -483,30 +475,6 @@ class MainActivity : AppCompatActivity() {
                 ?: Toast.makeText(this, "Picker unavailable", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Toast.makeText(this, "Picker failed: ${e.message}", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    /** Share the MITM CA cert so the setup script can trust it. */
-    private fun shareMitmCa() {
-        val pem = MitmCa.caPem(this)
-        if (pem == null) {
-            Toast.makeText(this, "CA unavailable", Toast.LENGTH_SHORT).show()
-            return
-        }
-        try {
-            val file = java.io.File(cacheDir, "network-proxy-ca.pem")
-            file.writeText(pem)
-            val uri = FileProvider.getUriForFile(
-                this, "${applicationContext.packageName}.fileprovider", file
-            )
-            val share = Intent(Intent.ACTION_SEND).apply {
-                type = "application/x-pem-file"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            startActivity(Intent.createChooser(share, "Share MITM CA (install in terminal)"))
-        } catch (e: Exception) {
-            Toast.makeText(this, "Share failed: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 

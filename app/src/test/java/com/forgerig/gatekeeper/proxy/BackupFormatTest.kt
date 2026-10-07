@@ -104,7 +104,7 @@ class BackupFormatTest {
 }
 
 /**
- * Regression cover for the MITM conversation title: the tap holds a raw
+ * Regression cover for the conversation title: the tap holds a raw
  * HTTP request (request line + headers + body), and feeding that to
  * JSONObject made every title silently blank.
  */

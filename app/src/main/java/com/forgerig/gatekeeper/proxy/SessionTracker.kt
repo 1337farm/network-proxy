@@ -5,7 +5,7 @@ package com.forgerig.gatekeeper.proxy
  * provider-matched sessions. Plain-HTTP brokered requests record the
  * proxy-injected key label; CONNECT tunnels record the matched provider
  * with "(client key)" (the client holds its own key inside the tunnel)
- * until MITM inner injection lands. Unmatched hosts are absent.
+ * until the key is known. Unmatched hosts are absent.
  *
  * On top of that key↔session mapping this tracks the *identity the CLI
  * agent itself knows about* — the provider's own response id
@@ -33,8 +33,7 @@ object SessionTracker {
     const val MAX_SESSIONS = 64
 
     /**
-     * Cap on the bytes any body tap is read from (matches the MITM
-     * request tap cap in [ProxyService]). Bigger input means a truncated
+     * Cap on the bytes any body tap is read from. Bigger input means a truncated
      * prefix, which can't yield an id anyway.
      */
     const val TAP_CAP_BYTES = 256 * 1024
@@ -193,7 +192,7 @@ object SessionTracker {
      * (metadata convention). "" when the client sent none — the caller
      * then falls through to the harvested id, per [resolveName].
      *
-     * [body] may be a bare JSON body or a tapped MITM request (HTTP head
+     * [body] may be a bare JSON body or a tapped request (HTTP head
      * + body): [jsonBody] strips the head, same as [titleOf].
      */
     fun nameOf(headers: Map<String, String>?, body: ByteArray? = null): String {
@@ -204,8 +203,8 @@ object SessionTracker {
 
     /**
      * [nameOf] for a raw tapped request: the head's headers and the body
-     * both count, so the MITM path (which only has the tap bytes) gets
-     * the same contract as the plain-HTTP path.
+     * both count, so a raw tap gets the same contract as the
+     * plain-HTTP path.
      */
     fun nameFromRequestHead(tap: ByteArray?): String {
         if (tap == null || tap.isEmpty()) return ""
@@ -214,7 +213,7 @@ object SessionTracker {
     }
 
     /**
-     * [sessionIdOf] for a raw tapped request: the MITM path only holds the
+     * [sessionIdOf] for a raw tapped request: a tap only holds the
      * tap bytes, and needs the same id contract as the plain-HTTP path so
      * both merge every turn of one conversation onto one session row.
      */
@@ -451,7 +450,7 @@ object SessionTracker {
      * // after the tap is fully written (ProxyService.kt:603-617):
      * SessionTracker.noteResponse(sessionId, tap?.toByteArray(), r.headers.toMap())
      *
-     * // MITM tunnel path, after t1/t2 join and the note() at
+     * // Tunnel path, after both relay directions join and the note() at
      * // ProxyService.kt:873 (so the session is registered first):
      * SessionTracker.noteResponse(sessionId, tap.toByteArray(), null)
      * ```
@@ -717,7 +716,7 @@ object SessionTracker {
     }
 
     /**
-     * The JSON body out of a raw request stream. A tapped MITM request
+     * The JSON body out of a raw request stream. A tapped request
      * starts with `POST /v1/messages HTTP/1.1` + headers, which makes
      * JSONObject throw ("must begin with '{'") and silently blank every
      * title — so the request line/headers are stripped first. A no-op for

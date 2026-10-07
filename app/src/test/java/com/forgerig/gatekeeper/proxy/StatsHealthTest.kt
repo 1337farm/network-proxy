@@ -136,20 +136,6 @@ class StatsHealthTest {
     }
 
     @Test
-    fun sniffModelFindsTopLevelId() {
-        assertEquals(
-            "claude-opus-5",
-            ProxyMetrics.sniffModel("""{"model":"claude-opus-5","messages":[]}""".toByteArray())
-        )
-        assertEquals(
-            "openrouter/anthropic/claude-opus-5:free",
-            ProxyMetrics.sniffModel("{\"model\" : \"openrouter/anthropic/claude-opus-5:free\"}".toByteArray())
-        )
-        assertEquals("", ProxyMetrics.sniffModel("""{"foo":1}""".toByteArray()))
-        assertEquals("", ProxyMetrics.sniffModel(ByteArray(0)))
-    }
-
-    @Test
     fun talliesSplitByHostAndModel() {
         ProxyMetrics.resetTallies()
         ProxyMetrics.addTokens(100, 10, 50, 0, "openrouter.ai", "model-a")
