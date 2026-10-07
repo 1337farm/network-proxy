@@ -38,8 +38,8 @@ object SetupScript {
     fun build(context: Context): String = scriptFor(PROXY_PORT)
 
     /**
-     * Non-LLM hosts that bypass the proxy entirely (direct connection).
-     * The proxy is an LLM broker; bulk downloads, registries and VCS
+     * Non-LLM hosts that bypass the router entirely (direct connection).
+     * The router is an LLM broker; bulk downloads, registries and VCS
      * hosting gain nothing from it and only burn phone CPU/battery plus
      * a single egress IP. Suffix-matched by most HTTP clients.
      * NOTE: never add LLM provider hosts here (openrouter, nvidia, zen, …) — those MUST stay proxied.
@@ -54,14 +54,14 @@ object SetupScript {
     /** Pure core: no Context needed, safe to call from JVM unit tests. */
     fun scriptFor(port: Int): String {
         return """
-            |# >>> network-proxy setup (run in Termux or proot Ubuntu; auto-detects) >>>
-            |# NOTE: the proxy itself runs inside the Android app on this
+            |# >>> forge-router setup (run in Termux or proot Ubuntu; auto-detects) >>>
+            |# NOTE: the router itself runs inside the Android app on this
             |# phone - this only routes this terminal through it. Start the
             |# app with the Start button first, then paste this block.
             |# Safe to run repeatedly: every step below converges.
-            |# Pasted in Termux, it also pushes the MITM CA into every
-            |# installed Ubuntu proot distro. HTTPS decryption is always on,
-            |# so the CA must be trusted everywhere clients run.
+            |# No CA, no trust stores: plain-HTTP harness traffic needs no
+            |# TLS at all, and TLS front-door clients pin the router's own
+            |# endpoint certificate (fetched below) directly.
             |export HTTP_PROXY="http://127.0.0.1:${port}" HTTPS_PROXY="http://127.0.0.1:${port}" NO_PROXY="localhost,127.0.0.1,::1,${BYPASS_HOSTS}"
             |export http_proxy="http://127.0.0.1:${port}" https_proxy="http://127.0.0.1:${port}" no_proxy="localhost,127.0.0.1,::1,${BYPASS_HOSTS}"
             |# Both cases: some runtimes (node/bun) only honor lowercase.
@@ -75,42 +75,45 @@ object SetupScript {
             |# (present in default bashrc files) so the vars also apply to
             |# non-interactive shells that explicitly 'source ~/.bashrc'
             |# (e.g. tool/CI invocations, which never see lines below it).
-            |# The CA trust exports MUST live in this same above-guard block:
+            |# The cert-path export MUST live in this same above-guard block:
             |# opencode serve is started non-interactively (opencode-start),
-            |# so a CA block below the guard never applies to it and MITM
-            |# fails with "self-signed certificate in certificate chain".
+            |# so an export below the guard never applies to it and pinned
+            |# TLS clients fail to verify the router.
             |# The marker check keeps repeat runs from appending duplicates.
             |python3 - "${port}" ~/.bashrc <<'PYEOF'
             |import sys
             |port, rc = sys.argv[1], sys.argv[2]
-            |begin = "# >>> network-proxy (managed) >>>"
-            |ca_begin = "# >>> network-proxy-ca (managed) >>>"
-            |ca_end = "# <<< network-proxy-ca (managed) <<<"
+            |begin = "# >>> forge-router (managed) >>>"
+            |cert_begin = "# >>> forge-router-cert (managed) >>>"
+            |cert_end = "# <<< forge-router-cert (managed) <<<"
+            |legacy_begin = "# >>> network-proxy (managed) >>>"
+            |legacy_ca_begin = "# >>> network-proxy-ca (managed) >>>"
+            |legacy_ca_end = "# <<< network-proxy-ca (managed) <<<"
             |try:
             |    text = open(rc).read()
             |except FileNotFoundError:
             |    text = ""
-            |# Pass 1: strip any standalone CA block (a CA block whose begin
-            |# line is NOT inside the managed proxy block - i.e. the legacy
-            |# below-guard layout). The unified block nests the CA markers
-            |# INSIDE the proxy markers, so only strip when the CA begin
-            |# appears before any proxy begin.
+            |# Pass 1: strip legacy standalone CA blocks (a CA block whose begin
+            |# line is NOT inside a managed proxy block - i.e. the legacy
+            |# below-guard layout). The unified block nests the cert markers
+            |# INSIDE the router markers, so only strip when the CA begin
+            |# appears before any proxy begin, ours or the stable app's.
             |lines = text.splitlines(keepends=True)
             |kept, skipping, stripped, in_proxy = [], False, 0, False
             |for ln in lines:
-            |    if begin in ln:
+            |    if begin in ln or legacy_begin in ln:
             |        in_proxy = True
             |        kept.append(ln)
             |        continue
-            |    if "# <<< network-proxy (managed) <<<" in ln:
+            |    if "# <<< forge-router (managed) <<<" in ln or "# <<< network-proxy (managed) <<<" in ln:
             |        in_proxy = False
             |        kept.append(ln)
             |        continue
-            |    if ca_begin in ln and not in_proxy:
+            |    if legacy_ca_begin in ln and not in_proxy:
             |        skipping = True
             |        stripped += 1
             |        continue
-            |    if ca_end in ln and skipping:
+            |    if legacy_ca_end in ln and skipping:
             |        skipping = False
             |        stripped += 1
             |        continue
@@ -119,18 +122,41 @@ object SetupScript {
             |        continue
             |    kept.append(ln)
             |text = "".join(kept)
-            |# Unified block present (proxy markers + nested CA markers):
+            |# Pass 2: drop the short-lived forge-variant proxy block
+            |# (network-proxy markers carrying our own port). The stable
+            |# :3128 block, if present, belongs to the other app and is left
+            |# untouched.
+            |lines = text.splitlines(keepends=True)
+            |kept, buf, in_legacy = [], [], False
+            |for ln in lines:
+            |    if legacy_begin in ln:
+            |        in_legacy = True
+            |        buf = [ln]
+            |        continue
+            |    if in_legacy:
+            |        buf.append(ln)
+            |        if "# <<< network-proxy (managed) <<<" in ln:
+            |            in_legacy = False
+            |            if any("3129" in b for b in buf):
+            |                stripped += len(buf)
+            |            else:
+            |                kept.extend(buf)
+            |            buf = []
+            |        continue
+            |    kept.append(ln)
+            |text = "".join(kept)
+            |# Unified block present (router markers + nested cert markers):
             |# converge, do not rewrite. Persist the stale-strip when it
             |# removed something, then stop.
-            |if begin in text and ca_begin in text:
+            |if begin in text and cert_begin in text:
             |    if stripped:
             |        open(rc, "w").write(text)
             |    print("bashrc: managed block already present (idempotent skip)")
             |    raise SystemExit(0)
             |if begin in text:
-            |    # Legacy proxy-only block (no nested CA exports): drop it so
-            |    # the rewrite below installs the unified block with CA trust
-            |    # above the guard (opencode serve needs it there).
+            |    # Legacy router-only block (no nested cert exports): drop it so
+            |    # the rewrite below installs the unified block with the cert
+            |    # path above the guard (opencode serve needs it there).
             |    lines2 = text.splitlines(keepends=True)
             |    kept2, skipping2 = [], False
             |    for ln in lines2:
@@ -138,7 +164,7 @@ object SetupScript {
             |            skipping2 = True
             |            stripped += 1
             |            continue
-            |        if "# <<< network-proxy (managed) <<<" in ln:
+            |        if "# <<< forge-router (managed) <<<" in ln:
             |            skipping2 = False
             |            stripped += 1
             |            continue
@@ -154,7 +180,7 @@ object SetupScript {
             |            skipping2 = True
             |            stripped += 1
             |            continue
-            |        if "# <<< network-proxy (managed) <<<" in ln:
+            |        if "# <<< forge-router (managed) <<<" in ln:
             |            skipping2 = False
             |            stripped += 1
             |            continue
@@ -170,18 +196,14 @@ object SetupScript {
             |        begin,
             |        'export HTTP_PROXY="http://127.0.0.1:' + port + '"',
             |        'export HTTPS_PROXY="http://127.0.0.1:' + port + '"',
-             |        'export NO_PROXY="localhost,127.0.0.1,::1,${BYPASS_HOSTS}"',
-             |        'export http_proxy="http://127.0.0.1:' + port + '"',
-             |        'export https_proxy="http://127.0.0.1:' + port + '"',
-             |        'export no_proxy="localhost,127.0.0.1,::1,${BYPASS_HOSTS}"',
-            |        ca_begin,
-             |        'export SSL_CERT_FILE="${"$"}HOME/.config/network-proxy/bundle.pem"',
-             |        'export REQUESTS_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"',
-             |        'export NODE_EXTRA_CA_CERTS="${"$"}HOME/.config/network-proxy/ca.pem"',
-             |        'export CURL_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"',
-             |        'export GIT_SSL_CAINFO="${"$"}HOME/.config/network-proxy/bundle.pem"',
-            |        ca_end,
-            |        "# <<< network-proxy (managed) <<<",
+            |        'export NO_PROXY="localhost,127.0.0.1,::1,${BYPASS_HOSTS}"',
+            |        'export http_proxy="http://127.0.0.1:' + port + '"',
+            |        'export https_proxy="http://127.0.0.1:' + port + '"',
+            |        'export no_proxy="localhost,127.0.0.1,::1,${BYPASS_HOSTS}"',
+            |        cert_begin,
+            |        'export FORGE_ROUTER_CERT="${"$"}HOME/.config/forge-router/endpoint-cert.pem"',
+            |        cert_end,
+            |        "# <<< forge-router (managed) <<<",
             |    ]) + "\n"
             |    guard = '[ -z "${"$"}PS1" ] && return'
             |    if guard in text:
@@ -191,7 +213,7 @@ object SetupScript {
             |        text = text.rstrip("\n") + "\n" + block
             |        where = "appended"
             |    open(rc, "w").write(text)
-            |    print("bashrc: managed block " + where + (" (stale CA block removed)" if stripped else ""))
+            |    print("bashrc: managed block " + where + (" (stale block removed)" if stripped else ""))
             |PYEOF
             |# Tell opencode to absorb 429s itself (proxy also retries).
             |# Converges: re-running rewrites the same values, no duplication.
@@ -209,124 +231,34 @@ object SetupScript {
             |# If 'opencode serve' is already running, RESTART it from this shell:
             |# exports only affect servers started after them (check with:
             |# tr '\\0' '\\n' </proc/$(pgrep -f '^opencode serve' | head -1)/environ | grep -i proxy).
-             |# Sanity probe: warn (don't abort) if the app proxy isn't up yet.
-             |# The proxy port may still be starting; the CA fetch + trust
-             |# steps below tolerate that and fall back to exported files.
-             |python3 -c "import socket; s=socket.create_connection(('127.0.0.1',${port}), timeout=5); s.close(); print('proxy probe: listening on 127.0.0.1:${port}')" || \
-             |  echo "proxy probe: 127.0.0.1:${port} refused - start the app proxy, then re-paste this script"
-             |# --- MITM CA trust (HTTPS decryption is always on) ---
-             |# Fetches the CA straight from the running proxy - no manual
-             |# Export step: \`curl http://127.0.0.1:${port}/ca.pem\` (works
-             |# with or without proxy env, direct-to-port included). Falls
-             |# back to a previously exported file when the proxy isn't up.
-            |# Trusted for this terminal: Ubuntu store (best effort),
-            |# Termux/Python/Node bundles, plus persistent exports (the bashrc
-            |# managed block above the PS1 guard - the only place
-            |# non-interactive shells like opencode serve will see).
-             |# Skips cleanly when absent (clients then fail TLS against the
-             |# proxy - that is the only symptom). After pasting: RESTART opencode serve so it
-            |# picks up the CA trust env (see note above).
-             |CA_PEM=""
-             |CA_TMP="${"$"}HOME/.config/network-proxy/ca.pem"
-             |mkdir -p "${"$"}HOME/.config/network-proxy"
+             |# Sanity probe: warn (don't abort) if the router isn't up yet.
+             |# The router port may still be starting; the cert fetch below
+             |# tolerates that and falls back to a previously fetched file.
+             |python3 -c "import socket; s=socket.create_connection(('127.0.0.1',${port}), timeout=5); s.close(); print('router probe: listening on 127.0.0.1:${port}')" || \
+             |  echo "router probe: 127.0.0.1:${port} refused - start the Forge Router app, then re-paste this script"
+             |# --- Router endpoint certificate (TLS front-door pinning) ---
+             |# Fetches the pinned cert straight from the running router - no
+             |# CA, no trust store changes: TLS clients pin this file
+             |# directly, and plain-HTTP harness traffic needs no TLS at all.
+             |# \`curl http://127.0.0.1:${port}/endpoint-cert.pem\` works with
+             |# or without proxy env, direct-to-port included. Falls back to
+             |# a previously fetched file when the router isn't up.
+             |CERT_PEM=""
+             |CERT_TMP="${"$"}HOME/.config/forge-router/endpoint-cert.pem"
+             |mkdir -p "${"$"}HOME/.config/forge-router"
              |if command -v curl >/dev/null 2>&1; then
-             |  curl -sS -m 10 --noproxy '*' "http://127.0.0.1:${port}/ca.pem" -o "${"$"}CA_TMP.tmp" 2>/dev/null && \
-             |    grep -q "BEGIN CERTIFICATE" "${"$"}CA_TMP.tmp" 2>/dev/null && mv "${"$"}CA_TMP.tmp" "${"$"}CA_TMP" && echo "MITM CA fetched from proxy (:${port}/ca.pem)"
-             |  rm -f "${"$"}CA_TMP.tmp" 2>/dev/null || true
+             |  curl -sS -m 10 --noproxy '*' "http://127.0.0.1:${port}/endpoint-cert.pem" -o "${"$"}CERT_TMP.tmp" 2>/dev/null && \
+             |    grep -q "BEGIN CERTIFICATE" "${"$"}CERT_TMP.tmp" 2>/dev/null && mv "${"$"}CERT_TMP.tmp" "${"$"}CERT_TMP" && echo "Router cert fetched from :${port}/endpoint-cert.pem"
+             |  rm -f "${"$"}CERT_TMP.tmp" 2>/dev/null || true
              |fi
-             |if [[ ! -s "${"$"}CA_TMP" ]]; then
-             |  for c in /sdcard/Download/network-proxy-ca.pem "${"$"}HOME/Download/network-proxy-ca.pem"; do
-             |    if [[ -f "${"$"}c" ]]; then cp "${"$"}c" "${"$"}CA_TMP"; echo "MITM CA taken from ${"$"}c (proxy fetch skipped)"; break; fi
-             |  done
-             |fi
-             |if [[ -s "${"$"}CA_TMP" ]]; then
-             |  CA_PEM="${"$"}CA_TMP"
-             |  # A refreshed app build regenerates the CA (new key) when the
-             |  # on-device CA is stale: always rebuild the bundle from the
-             |  # freshly fetched CA, never reuse a bundle from a previous CA.
-             |  rm -f "${"$"}HOME/.config/network-proxy/bundle.pem"
-             |  SYS_BUNDLE=""; for b in /etc/ssl/certs/ca-certificates.crt "${"$"}PREFIX/etc/tls/cert.pem"; do
-             |    if [[ -f "${"$"}b" ]]; then SYS_BUNDLE="${"$"}b"; break; fi
-             |  done
-             |  if [[ -n "${"$"}SYS_BUNDLE" ]]; then
-             |    cat "${"$"}SYS_BUNDLE" "${"$"}HOME/.config/network-proxy/ca.pem" > "${"$"}HOME/.config/network-proxy/bundle.pem"
-             |    export SSL_CERT_FILE="${"$"}HOME/.config/network-proxy/bundle.pem"
-             |    export REQUESTS_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"
-             |    export NODE_EXTRA_CA_CERTS="${"$"}HOME/.config/network-proxy/ca.pem"
-             |    export CURL_CA_BUNDLE="${"$"}HOME/.config/network-proxy/bundle.pem"
-             |    export GIT_SSL_CAINFO="${"$"}HOME/.config/network-proxy/bundle.pem"
-             |  fi
-             |  if [[ -d /usr/local/share/ca-certificates ]]; then
-             |    cp "${"$"}HOME/.config/network-proxy/ca.pem" /usr/local/share/ca-certificates/network-proxy-ca.crt 2>/dev/null || true
-             |    update-ca-certificates 2>/dev/null || true
-             |  fi
-             |  # --- Environment detect: Termux vs Ubuntu proot ---
-             |  # uname -o is "Android" under Termux (even inside some proot
-             |  # wrappers), so require BOTH the Android marker AND a live
-             |  # ${"$"}PREFIX dir. ${"$"}PREFIX leaks into proot env, therefore an
-             |  # Ubuntu os-release always wins over the Termux guess.
-             |  IS_TERMUX=0
-             |  if [[ "$(uname -o 2>/dev/null)" == "Android" ]] && [[ -n "${"$"}{PREFIX:-}" ]] && [[ -d "${"$"}PREFIX" ]]; then IS_TERMUX=1; fi
-             |  if grep -qi '^ID=ubuntu' /etc/os-release 2>/dev/null; then IS_TERMUX=0; fi
-             |  if [[ "${"$"}IS_TERMUX" == "1" ]]; then
-             |    echo "Termux detected: CA trusted above for this shell; now pushing into Ubuntu proot distros"
-             |    # Termux itself has no update-ca-certificates store tool by
-             |    # default - the env bundle + exports above are its trust.
-             |    # Fan out the CA FILE into every installed Ubuntu rootfs so
-             |    # each distro trusts MITM splits without manual copying.
-             |    # Guarded on a non-empty CA: with CA_PEM="" this would copy
-             |    # an empty file over a distro's real trust config.
-             |    if [[ ! -s "${"$"}CA_PEM" ]]; then
-             |      echo "No CA file available - skipping proot fan-out (clients will fail TLS)"
-             |    else
-             |    ROOTFS_DIRS=""
-             |    if [[ -d "${"$"}PREFIX/var/lib/proot-distro/installed-rootfs" ]]; then
-             |      ROOTFS_DIRS="${"$"}ROOTFS_DIRS ${"$"}PREFIX/var/lib/proot-distro/installed-rootfs/*/"
-             |    fi
-             |    # Conventional non-proot-distro installs (Andronix and co).
-             |    for d in "${"$"}HOME/ubuntu" "${"$"}HOME/ubuntu-fs" "${"$"}HOME/.termux/ubuntu"; do
-             |      if [[ -d "${"$"}d/usr" ]]; then ROOTFS_DIRS="${"$"}ROOTFS_DIRS ${"$"}d/"; fi
-             |    done
-             |    FOUND=0
-             |    for rootfs in ${"$"}ROOTFS_DIRS; do
-             |      [[ -d "${"$"}rootfs/usr" ]] || continue
-             |      dist="$(basename "${"$"}rootfs")"
-             |      certdir="${"$"}rootfs/usr/local/share/ca-certificates"
-             |      mkdir -p "${"$"}certdir" 2>/dev/null
-             |      if cp "${"$"}CA_PEM" "${"$"}certdir/network-proxy-ca.crt" 2>/dev/null; then
-             |        FOUND=1
-             |        echo "CA installed into proot distro: ${"$"}dist"
-             |      else
-             |        echo "CA copy failed for ${"$"}dist (storage permission?) - copy ${"$"}CA_PEM there manually"
-             |        continue
-             |      fi
-             |      if command -v proot-distro >/dev/null 2>&1 && [[ "${"$"}rootfs" == "${"$"}PREFIX"* ]]; then
-             |        if proot-distro login "${"$"}dist" -- update-ca-certificates 2>/dev/null; then
-             |          echo "CA store updated inside ${"$"}dist"
-             |        else
-             |          echo "update-ca-certificates skipped inside ${"$"}dist - run it there manually once"
-             |        fi
-             |      else
-             |        echo "non-proot-distro rootfs ${"$"}dist: run update-ca-certificates inside it once"
-             |      fi
-             |    done
-             |    if [[ "${"$"}FOUND" == "0" ]]; then
-             |      echo "No Ubuntu rootfs found. Install a proot distro and re-run this script to push the CA into it."
-             |    else
-             |      echo "CA now trusted in Termux and in each distro above."
-             |      echo "proot-distro logins inherit these proxy env vars; if a tool ignores them, check it reads ${"$"}HTTPS_PROXY."
-             |    fi
-             |    fi
-             |  fi
-             |  # NOTE: persistent CA exports are NOT appended here anymore -
-             |  # they already live in the above-guard managed block (bashrc
-             |  # step), which is the only place non-interactive shells
-             |  # (opencode serve via opencode-start) will ever see.
-             |  echo "MITM CA trusted for this terminal (bundle rebuilt)"
+             |if [[ -s "${"$"}CERT_TMP" ]]; then
+             |  CERT_PEM="${"$"}CERT_TMP"
+             |  export FORGE_ROUTER_CERT="${"$"}CERT_PEM"
+             |  echo "Router cert ready for this terminal (${"$"}CERT_PEM}); pin TLS clients to it"
              |else
-             |  echo "MITM CA not found - HTTPS will be tunneled opaque (no MITM)"
+             |  echo "Router cert not found - start the app and re-paste, or fetch manually: curl --noproxy '*' http://127.0.0.1:${port}/endpoint-cert.pem"
              |fi
-             |# <<< network-proxy setup <<<
+             |# <<< forge-router setup <<<
         """.trimMargin()
     }
 
@@ -336,26 +268,29 @@ object SetupScript {
      *  legacy unmarked exports left by older setup builds. */
     fun cleanup(port: Int = PROXY_PORT): String {
         return """
-            |# >>> network-proxy cleanup (run in proot Ubuntu) >>>
-            |# NOTE: the proxy runs inside the Android app, not here - there
+            |# >>> forge-router cleanup (run in proot Ubuntu) >>>
+            |# NOTE: the router runs inside the Android app, not here - there
             |# is no daemon pid lent to kill on this side. This only removes
             |# the env/config this setup script added. Stop the app via its
-            |# Stop button to actually shut the proxy down.
+            |# Stop button to actually shut the router down.
             |# Safe to run repeatedly: second run finds nothing and no-ops.
+            |# Only forge-router blocks and our own port's exports are
+            |# removed: the stable proxy's :3128 block belongs to the other
+            |# app and is left untouched.
             |if [[ -f ~/.bashrc ]]; then
-            |  python3 - ~/.bashrc <<'PYEOF'
+            |  python3 - ~/.bashrc $port <<'PYEOF'
             |import sys
-            |rc = sys.argv[1]
-            |begin, end = "# >>> network-proxy", "# <<< network-proxy"
+            |rc, port = sys.argv[1], sys.argv[2]
+            |begin, end = "# >>> forge-router", "# <<< forge-router"
             |lines = open(rc).read().splitlines(keepends=True)
             |# Pass 1: drop fenced marker blocks plus legacy unmarked lines
-            |# from older setup builds (bare 127.0.0.1 proxy exports and the
-            |# old grep-guard line). Anything else is left untouched.
+            |# from older setup builds (bare 127.0.0.1 exports for OUR port
+            |# and the old grep-guard line). Anything else is left untouched.
             |def managed(ln):
             |    s = ln.strip()
-            |    if "network-proxy" in ln:
+            |    if "forge-router" in ln:
             |        return True
-            |    if s.startswith("export ") and "127.0.0.1" in s and "PROXY" in s.upper():
+            |    if s.startswith("export ") and ("127.0.0.1:" + port) in s and "PROXY" in s.upper():
             |        return True
             |    return False
             |kept, skipping = [], False
@@ -386,10 +321,9 @@ object SetupScript {
             |      + (" (nothing to do)" if removed == 0 else ""))
             |PYEOF
             |fi
-            |if [ -n "${"$"}{PROXY_METRICS_FILE:-}" ]; then METRICS_FILE="${"$"}PROXY_METRICS_FILE"; else METRICS_FILE="${"$"}HOME/.cache/network-proxy/metrics.jsonl"; fi
-            |if [[ -f "${"$"}METRICS_FILE" ]]; then
-            |  > "${"$"}METRICS_FILE"
-            |  echo "Cleared local metrics copy: ${"$"}METRICS_FILE"
+            |if [[ -f "${"$"}HOME/.cache/forge-router/metrics.jsonl" ]]; then
+            |  > "${"$"}HOME/.cache/forge-router/metrics.jsonl"
+            |  echo "Cleared local metrics copy: ${"$"}HOME/.cache/forge-router/metrics.jsonl"
             |fi
             |unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy
             |echo "Unset proxy env vars (both cases; re-running is a no-op)"
@@ -400,9 +334,9 @@ object SetupScript {
             |  python3 -c "import socket; s=socket.create_connection(('8.8.8.8',53),timeout=5); s.close(); print('direct connectivity OK (proxy bypassed)')" 2>/dev/null || echo "(probe failed - check network)"
             |fi
             |echo "=== Cleanup complete ==="
-            |echo "To stop the actual proxy, tap Stop in the Android app."
+            |echo "To stop the actual router, tap Stop in the Android app."
             |echo "Then run 'source ~/.bashrc' or open a new terminal to fully apply."
-            |# <<< network-proxy cleanup <<<
+            |# <<< forge-router cleanup <<<
         """.trimMargin()
     }
 }

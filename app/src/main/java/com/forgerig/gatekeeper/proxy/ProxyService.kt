@@ -36,286 +36,6 @@ class ProxyService : Service() {
         const val ACTION_STOP = "com.forgerig.gatekeeper.proxy.STOP"
         const val EXTRA_ONLY_IF_STOPPED = "onlyIfStopped"
 
-        /**
-         * Test shim for the private [stripSessionHeaders], so the head
-         * rewriter is covered by JVM unit tests (the MITM path itself
-         * needs a device).
-         */
-        @JvmStatic
-        fun stripSessionHeadersForTest(head: ByteArray): ByteArray = stripSessionHead(head)
-
-        /**
-         * Test shim for the private [readRequestHeadFrom]. Splitting a
-         * request off the wire is easy to get subtly wrong in a way that
-         * only shows up as a dead connection on device, so it is covered
-         * here.
-         */
-        @JvmStatic
-        fun readRequestHeadForTest(raw: ByteArray, cap: Int = 64 * 1024): ByteArray? =
-            readRequestHeadFrom(java.io.ByteArrayInputStream(raw), cap)
-
-        /**
-         * Reads the request head (through the terminating CRLFCRLF) off the
-         * client stream and returns it verbatim. Byte-exact, because the head
-         * is re-emitted upstream by [stripSessionHeaders] and must otherwise
-         * survive untouched. Returns null only when the peer closed before
-         * sending anything; returns a short buffer when the cap is hit first.
-         */
-        private fun readRequestHeadFrom(input: java.io.InputStream, cap: Int): ByteArray? {
-            val buf = java.io.ByteArrayOutputStream()
-            val cr = '\r'.code
-            val lf = '\n'.code
-            var p1 = -1; var p2 = -1; var p3 = -1
-            while (true) {
-                val b = input.read()
-                if (b < 0) return if (buf.size() == 0) null else buf.toByteArray()
-                buf.write(b)
-                p3 = p2; p2 = p1; p1 = b
-                // p1,p2,p3 are the last three bytes read, so a head ends on
-                // them being \n,\r,\n.
-                if (p1 == lf && p2 == cr && p3 == lf) return buf.toByteArray()
-                if (buf.size() >= cap) return buf.toByteArray()
-            }
-        }
-
-        /**
-         * Drops the proxy-internal session-correlation headers from a
-         * request head. The plain-HTTP branch does this before
-         * forwarding; the MITM branch has to do it too, because it relays
-         * the client's head upstream and would otherwise leak
-         * `x-session-id` / `x-session-name` to the provider. Header names
-         * are matched case-insensitively; every other byte is copied
-         * through, request line and CRLFCRLF included, so the head still
-         * parses upstream.
-         */
-        /**
-         * Test shims for the body-framing helpers. Knowing where one request
-         * ends is the whole ballgame for attributing a session while the
-         * connection is still open, so it is covered by tests.
-         */
-        @JvmStatic
-        fun contentLengthForTest(head: ByteArray): Long = contentLengthOf(head)
-
-        @JvmStatic
-        fun isChunkedForTest(head: ByteArray): Boolean = isChunked(head)
-
-        @JvmStatic
-        fun relayExactlyForTest(
-            input: java.io.InputStream,
-            output: java.io.OutputStream,
-            counter: java.util.concurrent.atomic.AtomicLong,
-            tap: java.io.ByteArrayOutputStream?,
-            tapCap: Int,
-            total: Long
-        ): Long = relayExactly(input, output, counter, tap, tapCap, total)
-
-        @JvmStatic
-        fun relayChunkedForTest(
-            input: java.io.InputStream,
-            output: java.io.OutputStream,
-            counter: java.util.concurrent.atomic.AtomicLong,
-            tap: java.io.ByteArrayOutputStream?,
-            tapCap: Int
-        ): Long = relayChunkedBody(input, output, counter, tap, tapCap)
-
-        /**
-         * Forwards exactly [total] body bytes, then returns. Used by the MITM
-         * path to finish one request without waiting for the connection to
-         * close: the caller can then attribute the session while the tunnel is
-         * still up. Returns the number of bytes actually moved, which is short
-         * of [total] only when the peer hung up mid-body.
-         */
-        private fun relayExactly(
-            input: java.io.InputStream,
-            output: java.io.OutputStream,
-            counter: java.util.concurrent.atomic.AtomicLong,
-            tap: java.io.ByteArrayOutputStream?,
-            tapCap: Int,
-            total: Long
-        ): Long {
-            val buf = ByteArray(16 * 1024)
-            var moved = 0L
-            while (moved < total) {
-                val want = minOf(buf.size.toLong(), total - moved).toInt()
-                val n = input.read(buf, 0, want)
-                if (n < 0) break
-                output.write(buf, 0, n)
-                output.flush()
-                counter.addAndGet(n.toLong())
-                moved += n
-                if (tap != null && tap.size() < tapCap) {
-                    tap.write(buf, 0, n.coerceAtMost(tapCap - tap.size()))
-                }
-            }
-            return moved
-        }
-
-        /**
-         * Forwards one chunked body, stopping after the terminating zero-length
-         * chunk (and its trailer). Returns the bytes moved. Like
-         * [relayExactly] this exists so the request can be finished and
-         * attributed without waiting for the connection to close.
-         */
-        private fun relayChunkedBody(
-            input: java.io.InputStream,
-            output: java.io.OutputStream,
-            counter: java.util.concurrent.atomic.AtomicLong,
-            tap: java.io.ByteArrayOutputStream?,
-            tapCap: Int
-        ): Long {
-            val line = java.io.ByteArrayOutputStream()
-            var moved = 0L
-            fun emit(bytes: ByteArray, n: Int) {
-                if (n <= 0) return
-                output.write(bytes, 0, n)
-                output.flush()
-                counter.addAndGet(n.toLong())
-                moved += n
-                if (tap != null && tap.size() < tapCap) {
-                    tap.write(bytes, 0, n.coerceAtMost(tapCap - tap.size()))
-                }
-            }
-            // Forward the chunked body byte-for-byte. The upstream connection
-            // was handed the ORIGINAL head, which still says
-            // `Transfer-Encoding: chunked`, so every framing byte (the size
-            // line, the CRLF that closes each chunk, the terminating 0-line
-            // and any trailer) MUST reach the provider or it sees a malformed
-            // stream. We parse only to know where the body ends so the request
-            // can be finished and attributed without waiting for close.
-            while (true) {
-                // Read one line verbatim, preserving its exact terminator.
-                line.reset()
-                while (true) {
-                    val b = input.read()
-                    if (b < 0) {
-                        // Truncated stream: forward whatever the line had.
-                        if (line.size() > 0) emit(line.toByteArray(), line.size())
-                        return moved
-                    }
-                    if (b == '\n'.code) {
-                        line.write(b)
-                        break
-                    }
-                    line.write(b)
-                    if (line.size() > 64) {
-                        // Pathological size line; forward it and bail rather
-                        // than buffer without bound.
-                        emit(line.toByteArray(), line.size())
-                        return moved
-                    }
-                }
-                val sizeLine = String(line.toByteArray(), Charsets.ISO_8859_1)
-                val size = sizeLine.trimEnd('\r', '\n')
-                    .substringBefore(';').trim().toLongOrNull(16) ?: -1L
-                // Forward the size line exactly as received.
-                emit(line.toByteArray(), line.size())
-                if (size <= 0L) {
-                    // Terminating chunk: the 0-line is already forwarded; copy
-                    // the trailer section verbatim. The trailer ends at the
-                    // first blank line; read whole lines so a real trailer
-                    // never over-reads into a following keep-alive request.
-                    while (true) {
-                        line.reset()
-                        var lineLen = 0
-                        while (true) {
-                            val tb = input.read()
-                            if (tb < 0) {
-                                if (lineLen > 0) emit(line.toByteArray(), lineLen)
-                                return moved
-                            }
-                            line.write(tb)
-                            lineLen++
-                            if (tb == '\n'.code) break
-                        }
-                        emit(line.toByteArray(), lineLen)
-                        // A line that is just CRLF (or LF) is the blank line
-                        // that terminates the trailer section.
-                        if (lineLen <= 2 && String(line.toByteArray(), Charsets.ISO_8859_1).trim().isEmpty()) {
-                            return moved
-                        }
-                    }
-                }
-                // Copy the payload exactly.
-                var remain = size
-                while (remain > 0) {
-                    val want = minOf(16 * 1024L, remain).toInt()
-                    val buf = ByteArray(want)
-                    var got = 0
-                    while (got < want) {
-                        val n = input.read(buf, got, want - got)
-                        if (n < 0) return moved
-                        got += n
-                    }
-                    emit(buf, got)
-                    remain -= got
-                }
-                // Copy the CRLF that closes this chunk.
-                val cr = input.read()
-                if (cr < 0) return moved
-                emit(byteArrayOf(cr.toByte()), 1)
-                val lf = input.read()
-                if (lf < 0) return moved
-                emit(byteArrayOf(lf.toByte()), 1)
-            }
-        }
-
-        /**
-         * The declared body length of a request head, or -1 when the head
-         * does not declare one. Negative values that are not -1 (a malformed
-         * Content-Length) also come back as -1, so a bad header degrades to
-         * "unknown framing" rather than to a bogus byte count.
-         */
-        private fun contentLengthOf(head: ByteArray): Long {
-            val raw = headerValue(head, "content-length") ?: return -1L
-            val n = raw.trim().toLongOrNull() ?: return -1L
-            return if (n >= 0) n else -1L
-        }
-
-        private fun isChunked(head: ByteArray): Boolean =
-            headerValue(head, "transfer-encoding")
-                ?.contains("chunked", ignoreCase = true) == true
-
-        /** First value of [name] in a request head, matched case-insensitively. */
-        private fun headerValue(head: ByteArray, name: String): String? {
-            val text = String(head, Charsets.ISO_8859_1)
-            // Skip the request line; only header lines can carry a value.
-            var start = text.indexOf("\r\n")
-            if (start < 0) return null
-            start += 2
-            while (start < text.length) {
-                var end = text.indexOf("\r\n", start)
-                if (end < 0) end = text.length
-                if (end == start) return null
-                val line = text.substring(start, end)
-                val colon = line.indexOf(':')
-                if (colon > 0 && line.substring(0, colon).trim().equals(name, ignoreCase = true)) {
-                    return line.substring(colon + 1).trim()
-                }
-                start = end + 2
-            }
-            return null
-        }
-
-        private fun stripSessionHead(head: ByteArray): ByteArray {
-            val text = String(head, Charsets.ISO_8859_1)
-            if (!text.contains("\r\n")) return head
-            val lines = text.split("\r\n")
-            val kept = ArrayList<String>(lines.size)
-            for ((i, line) in lines.withIndex()) {
-                if (i == 0) { kept.add(line); continue }
-                val c = line.indexOf(':')
-                if (c > 0) {
-                    val key = line.substring(0, c).trim()
-                    if (key.equals(SessionTracker.ID_HEADER_KEY, true) ||
-                        key.equals("x-session-name", true) ||
-                        key.equals("x-session-title", true)
-                    ) continue
-                }
-                kept.add(line)
-            }
-            return kept.joinToString("\r\n").toByteArray(Charsets.ISO_8859_1)
-        }
-
         private const val MAX_BODY_BYTES = 32 * 1024 * 1024L
         private const val POOL_SIZE = 32
         /** Health self-ping cadence + consecutive failures before self-restart. */
@@ -348,7 +68,6 @@ class ProxyService : Service() {
     // locking, so the hot relay read paths stay lock-free.
     @Volatile private var port = PROXY_PORT
     @Volatile private var metricsEnabled = true
-    @Volatile private var mitmEnabled = true
     private var client: OkHttpClient? = null
     private var serverThread: Thread? = null
     private var pool = Executors.newFixedThreadPool(POOL_SIZE)
@@ -399,7 +118,7 @@ class ProxyService : Service() {
      * authoritative stamp ([startedAtMs]), so this agrees with the value in
      * the notification instead of lagging it by the bind time. The `running`
      * test is what hides the pre-bind window: 0 renders as plain
-     * "Proxy running" until the socket is up.
+     * "Router running" until the socket is up.
      */
     fun uptimeMs(): Long {
         val s = startedAtMs
@@ -442,14 +161,13 @@ class ProxyService : Service() {
         }
         port = PROXY_PORT
         metricsEnabled = intent?.getBooleanExtra("metricsEnabled", true) ?: true
-        mitmEnabled = intent?.getBooleanExtra("mitmEnabled", true) ?: true
 
         if (running.get() == 1) {
             if (intent?.getBooleanExtra(EXTRA_ONLY_IF_STOPPED, false) == true) {
                 // Ensure-running ping (app start): already up, don't flap.
                 // Re-assert the foreground state (the guard below would
                 // otherwise skip it) but don't re-post an identical shade row.
-                updateNotification("Proxy running on $BIND_ADDRESS:$port", true, forceForeground = true)
+                updateNotification("Router running on $BIND_ADDRESS:$port", true, forceForeground = true)
                 stateCallback?.invoke(true, null)
                 return START_STICKY
             }
@@ -457,8 +175,7 @@ class ProxyService : Service() {
             stopProxyAndRelease()
         }
         lastError = null
-        if (mitmEnabled) MitmCa.ensureLoaded(this)
-        ProxyMetrics.event("Starting proxy on $BIND_ADDRESS:$port")
+        ProxyMetrics.event("Starting router on $BIND_ADDRESS:$port")
         startProxy(port)
         return START_STICKY
     }
@@ -470,7 +187,7 @@ class ProxyService : Service() {
         // no-op guard in updateNotification would otherwise swallow this
         // and the service would never re-enter the foreground.
         if (running.get() == 1) {
-            updateNotification("Proxy running on $BIND_ADDRESS:$port", true, forceForeground = true)
+            updateNotification("Router running on $BIND_ADDRESS:$port", true, forceForeground = true)
         }
         super.onTaskRemoved(rootIntent)
     }
@@ -514,7 +231,7 @@ class ProxyService : Service() {
             }
             running.set(1)
             lastHealthOkMs = System.currentTimeMillis()
-            updateNotification("Proxy running on $BIND_ADDRESS:$port", true)
+            updateNotification("Router running on $BIND_ADDRESS:$port", true)
             stateCallback?.invoke(true, null)
             scheduleHealth()
             while (running.get() == 1) {
@@ -677,21 +394,15 @@ class ProxyService : Service() {
                 activeSessions.add(sessionId)
             }
 
-            // Local CA fetch: `curl http://127.0.0.1:<port>/ca.pem` serves
-            // the MITM CA PEM directly — no manual Export step needed.
+            // Router-local endpoint: `curl http://127.0.0.1:<port>/endpoint-cert.pem`
+            // serves the pinned TLS certificate — no CA, no manual export.
             // Matches absolute-form (proxied) and origin-form (direct to
             // the listening port, incl. --noproxy '*'), but ONLY when the
-            // request is addressed at us (loopback host): a proxied
-            // GET http://example.com/ca.pem must still go upstream.
-            // Handled here, before any upstream forwarding, so it never
-            // leaks upstream.
-            val peerIsLoopback = CaEndpoint.isLoopbackPeer(socket.inetAddress?.hostAddress)
-            if (method == "GET" && CaEndpoint.isLocalEndpointCertRequest(url, peerIsLoopback)) {
+            // request is addressed at us (loopback host). Handled here,
+            // before any upstream forwarding, so it never leaks upstream.
+            val peerIsLoopback = RouterEndpoint.isLoopbackPeer(socket.inetAddress?.hostAddress)
+            if (method == "GET" && RouterEndpoint.isLocalEndpointCertRequest(url, peerIsLoopback)) {
                 serveEndpointCertPem(output, sessionId, requestId)
-                return
-            }
-            if (method == "GET" && isLocalCaRequest(url, peerIsLoopback)) {
-                serveCaPem(output, sessionId, requestId)
                 return
             }
 
@@ -706,8 +417,8 @@ class ProxyService : Service() {
                 body = readExact(rawIn, contentLength.toInt())
             }
 
-            // --- LLM-only gate: broker treatment (keys, routes, context,
-            // MITM) is reserved for configured provider hosts. Anything
+            // --- LLM-only gate: broker treatment (keys, routes, context)
+            // is reserved for configured provider hosts. Anything
             // else tunnels opaque by default, or 403s in strict mode.
             val routeStore = ProviderBroker.store(this)
             val llmDecision = if (gatewayMode) {
@@ -1129,9 +840,8 @@ SessionTracker.noteUsage(sessionId, found)
         val hostPort = authority.split(":")
         val host = hostPort[0]
         val port = hostPort.getOrNull(1)?.toIntOrNull() ?: 443
-        // LLM-only gate: MITM split + usage scan are reserved for
-        // configured provider hosts. Foreign hosts tunnel opaque
-        // (or 403 in strict mode) — no leaf issuance, no scan CPU.
+        // LLM-only gate: usage scan is reserved for configured provider
+        // hosts. Foreign hosts tunnel opaque (or 403 in strict mode).
         val connStore = ProviderBroker.store(this)
         when (LlmPolicy.decide(host, connStore.llmHosts(), connStore.llmOnlyStrict)) {
             LlmPolicy.Decision.DENY -> {
@@ -1154,7 +864,7 @@ SessionTracker.noteUsage(sessionId, found)
                 opaqueTunnel(clientSocket, clientIn, clientOut, host, port, sessionId, requestId, startedAt)
                 return
             }
-            LlmPolicy.Decision.BROKERED -> { /* fall through to MITM attempt */ }
+            LlmPolicy.Decision.BROKERED -> { /* fall through to opaque tunnel */ }
         }
         // Attribute tunneled sessions at provider level (client holds its
         // own key inside the tunnel — label shows that; model fills in
@@ -1166,22 +876,14 @@ SessionTracker.noteUsage(sessionId, found)
                 SessionTracker.note(sessionId, mp.id, "(client key)", "", host.lowercase())
             }
         }
-        // HTTPS split (always on; no user toggle): terminate client TLS
-        // with our local CA leaf, re-originate verified TLS upstream, scan
-        // plaintext usage blocks. Needs the CA installed client-side
-        // (setup script curls /ca.pem); otherwise the client aborts the
-        // handshake and we fall back to opaque tunneling — so tooling that
-        // never installed the CA keeps working byte-for-byte.
-        if (mitmEnabled && handleConnectMitm(clientSocket, clientIn, clientOut, host, port, sessionId, requestId, startedAt)) {
-            return
-        }
+        // No TLS interception: CONNECT sessions always tunnel byte-identical.
+        // Request/response reading happens on the brokered plain-HTTP path,
+        // where the harness addresses the router directly.
         opaqueTunnel(clientSocket, clientIn, clientOut, host, port, sessionId, requestId, startedAt)
     }
 
     /**
-     * Byte-identical relay for one CONNECT session (no MITM, no scan).
-     * Used for off-allowlist hosts under LLM-only policy and as the
-     * fallback when the MITM split declines.
+     * Byte-identical relay for one CONNECT session.
      */
     private fun opaqueTunnel(
         clientSocket: Socket,
@@ -1213,7 +915,7 @@ SessionTracker.noteUsage(sessionId, found)
             val t2 = Thread { relay(upIn, clientOut, downBytes) }
             t1.start(); t2.start()
             t1.join(); t2.join()
-            // NOTE: bytesOut is fed per-chunk inside relay()/relayTap();
+            // NOTE: bytesOut is fed per-chunk inside relay();
             // adding the lump sum here would double-count tunneled bytes.
             ProxyMetrics.addBytes(host, upBytes.get(), downBytes.get())
             if (metricsEnabled) ProxyMetrics.recordTunnelEnd(
@@ -1235,375 +937,6 @@ SessionTracker.noteUsage(sessionId, found)
             SessionTracker.clear(sessionId)
             try { upstream?.close() } catch (_: Exception) {}
             try { clientSocket.close() } catch (_: Exception) {}
-        }
-    }
-
-    /**
-     * TLS split for one CONNECT session. Returns true when the split
-     * handled the session (success or clean error page); false to let the
-     * caller fall back to an opaque tunnel.
-     */
-    private fun handleConnectMitm(
-        clientSocket: Socket,
-        clientIn: BufferedInputStream,
-        clientOut: java.io.OutputStream,
-        host: String,
-        port: Int,
-        sessionId: String,
-        requestId: String,
-        startedAt: Long
-    ): Boolean {
-        // Shared across the two relay threads: t1 may re-key the session
-        // once it has read the request, and t2 credits tokens to whichever
-        // id is current at the time.
-        val currentSessionId = java.util.concurrent.atomic.AtomicReference(sessionId)
-        val serverCtx = try {
-            MitmCa.serverContext(this, host.lowercase())
-        } catch (_: Exception) { null } ?: return false
-        var tlsClient: javax.net.ssl.SSLSocket? = null
-        var tlsUp: javax.net.ssl.SSLSocket? = null
-        // Ownership of the raw upstream socket between Socket() and the TLS
-        // wrap. createSocket(raw, .., autoClose=true) only adopts `raw` when it
-        // RETURNS; if connect() or the wrap itself throws, the plain socket is
-        // orphaned — the catch below can only close tlsClient/tlsUp, and tlsUp
-        // is still null, so every declined/failed CONNECT leaked one fd.
-        val upstreamRaw = UpstreamRawGuard()
-        try {
-            clientOut.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray())
-            clientOut.flush()
-            tlsClient = serverCtx.socketFactory.createSocket(
-                clientSocket, null, clientSocket.port, true
-            ) as javax.net.ssl.SSLSocket
-            tlsClient.useClientMode = false
-            tlsClient.startHandshake()
-            val upCtx = MitmCa.upstreamContext()
-            val raw = Socket()
-            upstreamRaw.track(raw)
-            raw.connect(InetSocketAddress(host, port), 30_000)
-            // Same read timeout opaqueTunnel uses: t2.join() is unbounded,
-            // so a silently-idle upstream would otherwise pin a pool
-            // thread (plus ~750KB of tap buffers) for the process lifetime.
-            raw.soTimeout = 120_000
-            tlsUp = upCtx.socketFactory.createSocket(raw, host, port, true) as javax.net.ssl.SSLSocket
-            // The wrap came back: tlsUp now owns `raw` and closes the
-            // underlying stream itself, so the guard must let go of it.
-            upstreamRaw.handOff()
-            tlsUp.useClientMode = true
-            tlsUp.sslParameters = tlsUp.sslParameters.apply {
-                endpointIdentificationAlgorithm = "HTTPS"
-            }
-            tlsUp.startHandshake()
-            requestCount.incrementAndGet()
-            ProxyMetrics.event("MITM split $host:$port (plaintext visible)")
-            val cIn = tlsClient.inputStream
-            val cOut = tlsClient.outputStream
-            val uIn = tlsUp.inputStream
-            val uOut = tlsUp.outputStream
-            val upBytes = java.util.concurrent.atomic.AtomicLong(0)
-            val downBytes = java.util.concurrent.atomic.AtomicLong(0)
-            val tap = java.io.ByteArrayOutputStream()
-            val tapCap = 512 * 1024
-            // Live usage scan: tokens count per chunk as they stream (the
-            // close-time scan below only covers encoded bodies the live
-            // scanner can't read — see scanTapBytesForClose).
-            val liveUsage = ProxyMetrics.StreamingUsage()
-            // Upstream model sniff: the first bytes of the decrypted
-            // request usually carry the top-level "model" field; feeds
-            // per-model tallies for a tunnel whose body stays opaque.
-            val upModel = java.util.concurrent.atomic.AtomicReference("")
-            // Request-head tap (256KB cap): first user turn feeds the
-            // session conversation title. Best-effort — huge bodies
-            // truncate and fall back to provider/host display.
-            val reqTap = java.io.ByteArrayOutputStream()
-            val reqTapCap = 256 * 1024
-            // Correlation metadata harvested from the decrypted request
-            // head, before it is sanitized. The MITM path reads these off
-            // the tap (the plain-HTTP branch reads them off its parsed
-            // header map) so both merge one conversation onto one row.
-            val headSessionId = java.util.concurrent.atomic.AtomicReference("")
-            val headSessionName = java.util.concurrent.atomic.AtomicReference("")
-            // Counted down once the request has been attributed. t2 waits on
-            // it before it starts, so a fast response can never be tallied
-            // against a model that has not been sniffed yet (which is what
-            // made the host/model table read "unattributed").
-            val requestAttributed = java.util.concurrent.CountDownLatch(1)
-            // Attaches everything the request revealed to its session row:
-            // the client's own id (so one conversation merges onto one row),
-            // its name (refreshing on every turn, which is what carries a
-            // mid-session rename), the conversation title and the model.
-            // Called from t1 once the request is fully in the tap.
-            fun attributeRequest(host: String) {
-                val tapped = reqTap.toByteArray()
-                val headId = headSessionId.get()
-                val headName = headSessionName.get()
-                // The model's only in the JSON body, so it can be sniffed
-                // once head+body are both present.
-                if (upModel.get().isEmpty()) {
-                    val m = ProxyMetrics.sniffModel(tapped, tapped.size)
-                    if (m.isNotEmpty()) upModel.set(m)
-                }
-                val sniffed = upModel.get()
-                val reqTitle = SessionTracker.titleOf(tapped)
-                val reqName = if (headName.isNotBlank()) headName else SessionTracker.nameFromRequestHead(tapped)
-                // The client's own id wins over the generated UUID. The
-                // CONNECT-time row is moved with it (via rekey) so it is
-                // not orphaned under the old id.
-                if (headId.isNotEmpty() && headId != currentSessionId.get()) {
-                    val from = currentSessionId.get()
-                    activeSessions.remove(from)
-                    SessionTracker.rekey(from, headId)
-                    currentSessionId.set(headId)
-                    activeSessions.add(headId)
-                }
-                if (headName.isNotBlank()) {
-                    SessionTracker.renameSession(currentSessionId.get(), headName)
-                }
-                if (sniffed.isNotBlank() || reqTitle.isNotBlank() || reqName.isNotBlank()) {
-                    val mp = ProviderStore.matchHost(ProviderBroker.store(this@ProxyService), host)
-                    SessionTracker.note(
-                        currentSessionId.get(), mp?.id ?: "", "(client key)", sniffed, host.lowercase(),
-                        title = reqTitle, name = reqName
-                    )
-                }
-            }
-            val t1 = Thread {
-                // relayTap swallows stream failures (a client that hangs up
-                // mid-request must not kill the process), so the head
-                // rewrite has to be equally tolerant: the write below is
-                // the one most likely to hit a broken pipe.
-                try {
-                    val head = readRequestHeadFrom(cIn, 64 * 1024)
-                    if (head == null) return@Thread
-                    headSessionId.set(SessionTracker.sessionIdFromRequestHead(head))
-                    headSessionName.set(SessionTracker.nameFromRequestHead(head))
-                    val sanitized = stripSessionHeaders(head)
-                    uOut.write(sanitized)
-                    uOut.flush()
-                    upBytes.addAndGet(sanitized.size.toLong())
-                    if (reqTap.size() < reqTapCap) {
-                        reqTap.write(sanitized, 0, sanitized.size.coerceAtMost(reqTapCap - reqTap.size()))
-                    }
-                    // Finish THIS request using its own framing, so the
-                    // session can be attributed below while the tunnel is
-                    // still open. Reading to EOF instead (the old
-                    // behaviour) meant attribution only ever happened when
-                    // the client hung up, which under keep-alive is the
-                    // whole life of the connection: the row sat unnamed
-                    // and the model was still unset when t2 tallied the
-                    // response, so usage was credited as "unattributed".
-                    val framed = when {
-                        isChunked(head) -> {
-                            relayChunkedBody(cIn, uOut, upBytes, reqTap, reqTapCap); true
-                        }
-                        else -> {
-                            val len = contentLengthOf(head)
-                            if (len < 0) false
-                            else { relayExactly(cIn, uOut, upBytes, reqTap, reqTapCap, len); true }
-                        }
-                    }
-                    if (framed) {
-                        attributeRequest(host)
-                        requestAttributed.countDown()
-                        // Anything past the framed body belongs to a later
-                        // request on the same connection; keep relaying it.
-                        relayTap(cIn, uOut, upBytes, reqTap, reqTapCap)
-                    } else {
-                        // No usable framing (or the peer went away before
-                        // the body finished): fall back to reading to EOF.
-                        relayTap(cIn, uOut, upBytes, reqTap, reqTapCap)
-                        attributeRequest(host)
-                        requestAttributed.countDown()
-                    }
-                } catch (_: Exception) {
-                    // Peer went away mid-head; nothing left to forward.
-                }
-            }
-            val t2 = Thread {
-                // Bounded: in the normal case this returns immediately,
-                // because the request body is relayed long before the
-                // provider replies. The cap only matters if a client sends
-                // a head it never finishes.
-                try { requestAttributed.await(5, java.util.concurrent.TimeUnit.SECONDS) } catch (_: InterruptedException) {}
-                relayTap(uIn, cOut, downBytes, tap, tapCap, liveUsage, host, requestId, upModel, false, currentSessionId.get())
-            }
-            t1.start(); t2.start()
-            t1.join(); t2.join()
-            // Verbose log: the decrypted response body (tap), stored once
-            // both relay directions have drained. The tap is the raw
-            // decrypted response (head + body), HTTP head included.
-            if (verboseLogging()) {
-                ResponseLog.add(host, "", tap.toByteArray())
-            }
-            // NOTE: bytesOut is fed per-chunk inside relay()/relayTap();
-            // adding the lump sum here would double-count tunneled bytes.
-            ProxyMetrics.addBytes(host, upBytes.get(), downBytes.get())
-            if (metricsEnabled) ProxyMetrics.recordTunnelEnd(
-                requestId, upBytes.get() + downBytes.get(), NetworkScenario.SUCCESS
-            )
-            if (tap.size() > 0) {
-                // Plaintext was already counted live per chunk; this only
-                // picks up gzip/deflate bodies. Never recount plaintext.
-                val found = ProxyMetrics.scanTapBytesForClose(tap.toByteArray())
-                if (found[0] + found[1] + found[2] + found[3] > 0) {
-                    ProxyMetrics.recordUsage(host, upModel.get(), requestId, found)
-                    SessionTracker.noteUsage(currentSessionId.get(), found)
-                    ProxyMetrics.event(
-                        "Tokens $host in=${found[0]} out=${found[1]} " +
-                            "cacheR=${found[2]} cacheW=${found[3]} (mitm encoded)"
-                    )
-                }
-            }
-            // Flush a trailing match deferred at the exact end of the last
-            // chunk (digit run of unknown completeness). Disjoint from both
-            // live counts and the encoded-body fallback above.
-            val tail = liveUsage.flush()
-            if (tail[0] + tail[1] + tail[2] + tail[3] > 0) {
-                ProxyMetrics.recordUsage(host, upModel.get(), requestId, tail)
-                    SessionTracker.noteUsage(currentSessionId.get(), tail)
-                    ProxyMetrics.event(
-                        "Tokens $host in=${tail[0]} out=${tail[1]} " +
-                            "cacheR=${tail[2]} cacheW=${tail[3]} (live tail)"
-                    )
-            }
-            val ms = System.currentTimeMillis() - startedAt
-            ProxyMetrics.event(
-                "MITM $host closed up=${humanBytesShort(upBytes.get())} " +
-                    "down=${humanBytesShort(downBytes.get())} ${ms}ms"
-            )
-            return true
-        } catch (e: Exception) {
-            // Client didn't trust our CA (or pinning) — caller tunnels opaque.
-            ProxyMetrics.eventWarning("MITM split declined for $host (${e.message}), tunneling opaque")
-            try { tlsClient?.close() } catch (_: Exception) {}
-            try { tlsUp?.close() } catch (_: Exception) {}
-            return false
-        } finally {
-            // No-op on the success path (handed off). On any failure between
-            // Socket() and a returned TLS socket, this is the only thing that
-            // releases the fd.
-            upstreamRaw.closeIfUnowned()
-        }
-    }
-
-    /**
-     * Tracks the raw upstream socket from `Socket()` until the TLS wrapper
-     * takes ownership of it.
-     *
-     * `SSLSocketFactory.createSocket(raw, host, port, true)` adopts the plain
-     * socket *only on return*: if it throws (TLS alert, bad protocol, OOM
-     * during context init) the caller still holds a connected, un-owned fd
-     * that nothing else knows about, and the enclosing catch can only close
-     * the `tlsUp` variable — which is still null. One fd leaked per
-     * declined/failed MITM CONNECT; under load that exhausts the per-process
-     * fd table and takes the whole proxy down.
-     *
-     * So ownership is explicit: [track] on creation, [handOff] immediately
-     * after the wrap returns, and [closeIfUnowned] as the single cleanup
-     * point. Deliberately not a `Socket` subclass and not Android-dependent,
-     * so the state machine is JVM-unit-testable against real sockets.
-     */
-    internal class UpstreamRawGuard {
-        private var raw: Socket? = null
-
-        /** True once the TLS socket owns the raw socket and will close it. */
-        var handedOff: Boolean = false
-            private set
-
-        /** Adopt a freshly created, not-yet-wrapped socket. */
-        fun track(socket: Socket) {
-            raw = socket
-        }
-
-        /**
-         * Release ownership because the TLS wrapper took the socket. Any
-         * later [closeIfUnowned] is a no-op — closing here would sever a
-         * live, working connection.
-         */
-        fun handOff() {
-            raw = null
-            handedOff = true
-        }
-
-        /**
-         * Close the socket if the TLS wrap never took it. Returns true when
-         * there was an un-owned socket to release (false = nothing to do),
-         * which is what the test asserts on.
-         */
-        fun closeIfUnowned(): Boolean {
-            val socket = raw ?: return false
-            raw = null
-            try { socket.close() } catch (_: Exception) {}
-            return true
-        }
-    }
-
-    /** Copy with byte counter + optional plaintext tap (capped) + optional
-     *  live usage scan (downstream direction only — pass null upstream).
-     *  [modelRef], when supplied on the UPSTREAM direction, sniffs the
-     *  request head for the top-level model id (first 4KB); downstream
-     *  tallies read it back for per-model attribution. Pass sniff=false
-     *  downstream so responses can never overwrite the request's model. */
-
-
-    /**
-     * Drops the proxy-internal session-correlation headers from a request
-     * head. The plain-HTTP branch does this at :458 before forwarding; the
-     * MITM branch has to do it here, because it relays the client's head
-     * upstream and would otherwise leak `x-session-id` / `x-session-name`
-     * to the provider. Header names are matched case-insensitively;
-     * everything else is copied through byte-for-byte.
-     */
-
-
-    private fun stripSessionHeaders(head: ByteArray): ByteArray = stripSessionHead(head)
-
-    private fun relayTap(
-        input: java.io.InputStream,
-        output: java.io.OutputStream,
-        counter: java.util.concurrent.atomic.AtomicLong,
-        tap: java.io.ByteArrayOutputStream?,
-        tapCap: Int,
-        liveUsage: ProxyMetrics.StreamingUsage? = null,
-        usageHost: String = "",
-        requestId: String? = null,
-        modelRef: java.util.concurrent.atomic.AtomicReference<String>? = null,
-        sniff: Boolean = true,
-        sessionId: String? = null
-    ) {
-        val head = java.io.ByteArrayOutputStream()
-        val headCap = 4096
-        try {
-            val buf = ByteArray(64 * 1024)
-            while (true) {
-                val n = input.read(buf)
-                if (n < 0) break
-                output.write(buf, 0, n)
-                output.flush()
-                bytesOut.addAndGet(n.toLong())
-                counter.addAndGet(n.toLong())
-                if (tap != null && tap.size() < tapCap) {
-                    tap.write(buf, 0, n.coerceAtMost(tapCap - tap.size()))
-                }
-                if (modelRef != null && sniff && modelRef.get().isEmpty() && head.size() < headCap) {
-                    head.write(buf, 0, n.coerceAtMost(headCap - head.size()))
-                    val sniffed = ProxyMetrics.sniffModel(head.toByteArray(), head.size())
-                    if (sniffed.isNotEmpty()) modelRef.set(sniffed)
-                }
-                if (liveUsage != null) {
-                    val found = liveUsage.feed(buf, n)
-                    if (found[0] + found[1] + found[2] + found[3] > 0) {
-                        ProxyMetrics.recordUsage(usageHost, modelRef?.get() ?: "", requestId, found)
-                        SessionTracker.noteUsage(sessionId, found)
-                        ProxyMetrics.event(
-                            "Tokens $usageHost in=${found[0]} out=${found[1]} " +
-                                "cacheR=${found[2]} cacheW=${found[3]} (live)"
-                        )
-                    }
-                }
-            }
-        } catch (_: Exception) {
-        } finally {
-            try { output.flush() } catch (_: Exception) {}
         }
     }
 
@@ -1819,7 +1152,7 @@ SessionTracker.noteUsage(sessionId, found)
      */
     private fun refreshNotification() {
         if (running.get() != 1) return
-        updateNotification("Proxy running on $BIND_ADDRESS:$port", true)
+        updateNotification("Router running on $BIND_ADDRESS:$port", true)
     }
 
     /**
@@ -1884,7 +1217,7 @@ SessionTracker.noteUsage(sessionId, found)
         if (isRunning && running.get() != 1) return
         val port = this.port
         val tps = if (isRunning) ProxyMetrics.outputTokensPerSecond() else 0.0
-        val title = if (isRunning) "Network Proxy running" else "Network Proxy stopped"
+        val title = if (isRunning) "Forge Router running" else "Forge Router stopped"
         val body = if (isRunning) {
             NotificationText.running(BIND_ADDRESS, port, tps, uptimeText())
         } else {
@@ -1936,21 +1269,6 @@ SessionTracker.noteUsage(sessionId, found)
         if (isRunning) startForeground(1, notification) else stopForeground(true)
     }
 
-    // ---- Local CA endpoint (curl-able) ----
-    /**
-     * True for requests addressed at THIS proxy asking for the CA:
-     * origin-form `/ca.pem`, or absolute-form with a loopback host
-     * (127.0.0.1/localhost/::1, any port) and path /ca.pem.
-     * Anything else — incl. `GET http://example.com/ca.pem` — is a
-     * normal proxied request and must go upstream.
-     * Logic lives in [CaEndpoint] (unit-tested); kept here as a thin
-     * delegate so existing call sites don't churn.
-     */
-    internal fun isLocalCaRequest(target: String, peerIsLoopback: Boolean = true): Boolean =
-        CaEndpoint.isLocalCaRequest(target, peerIsLoopback)
-
-    /** Path component of an origin-form or absolute-form request target. */
-    internal fun caPathOf(target: String): String? = CaEndpoint.pathOf(target)
 
     /** Serve our endpoint certificate PEM inline; never forwards upstream. */
     private fun serveEndpointCertPem(
@@ -1996,52 +1314,6 @@ SessionTracker.noteUsage(sessionId, found)
         }
     }
 
-    /** Serve the MITM CA PEM inline; never forwards upstream. */
-    private fun serveCaPem(
-        output: java.io.OutputStream,
-        sessionId: String,
-        requestId: String
-    ) {
-        try {
-            val pem = MitmCa.caPem(this)
-            if (pem == null) {
-                val msg = "CA unavailable"
-                val head = "HTTP/1.1 503 Service Unavailable\r\n" +
-                    "Content-Type: text/plain\r\n" +
-                    "Content-Length: ${msg.toByteArray().size}\r\n" +
-                    "Connection: close\r\n\r\n"
-                output.write(head.toByteArray())
-                output.write(msg.toByteArray())
-                output.flush()
-                if (metricsEnabled) ProxyMetrics.recordRequestEnd(
-                    sessionId, requestId, 503, 0, NetworkScenario.UNKNOWN
-                )
-                return
-            }
-            val body = pem.toByteArray(Charsets.UTF_8)
-            val head = "HTTP/1.1 200 OK\r\n" +
-                "Content-Type: application/x-pem-file\r\n" +
-                "Content-Length: ${body.size}\r\n" +
-                "Connection: close\r\n\r\n"
-            output.write(head.toByteArray())
-            output.write(body)
-            output.flush()
-            requestCount.incrementAndGet()
-            bytesOut.addAndGet(body.size.toLong())
-            if (metricsEnabled) ProxyMetrics.recordRequestEnd(
-                sessionId, requestId, 200, body.size.toLong(), NetworkScenario.SUCCESS
-            )
-            ProxyMetrics.event("Served local CA (${humanBytesShort(body.size.toLong())})")
-        } catch (e: Exception) {
-            try {
-                output.write("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".toByteArray())
-                output.flush()
-            } catch (_: Exception) {}
-            if (metricsEnabled) ProxyMetrics.recordRequestEnd(
-                sessionId, requestId, 500, 0, NetworkScenario.UNKNOWN
-            )
-        }
-    }
 
     // ---- Key-broker helpers ----
     private data class NextKey(

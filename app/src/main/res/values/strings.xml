@@ -1,12 +1,12 @@
 <resources>
-    <string name="app_name">Forge Proxy</string>
-    <string name="proxy_running">Proxy running on port %1$d</string>
-    <string name="proxy_stopped">Proxy stopped</string>
-    <string name="start_proxy">Start Proxy</string>
-    <string name="stop_proxy">Stop Proxy</string>
+    <string name="app_name">Forge Router</string>
+    <string name="proxy_running">Router running on port %1$d</string>
+    <string name="proxy_stopped">Router stopped</string>
+    <string name="start_proxy">Start Router</string>
+    <string name="stop_proxy">Stop Router</string>
     <string name="port_bind_failed">Cannot listen on port %1$d — another app may be using it</string>
     <string name="setup_script_title">Terminal setup script</string>
-    <string name="setup_script_hint">Copy and paste into Termux / proot Ubuntu to route opencode through this proxy.</string>
+    <string name="setup_script_hint">Copy and paste into Termux / proot Ubuntu to route opencode through this router.</string>
     <string name="copy_setup_script">Copy setup script</string>
     <string name="metrics_enabled">Enable Metrics</string>
     <string name="metrics_export_path">Export Path</string>
@@ -19,15 +19,13 @@
     <string name="clear_metrics">Clear Metrics</string>
     <string name="expand">Expand</string>
     <string name="cleanup_script_title">Terminal cleanup script</string>
-    <string name="cleanup_script_hint">Copy and paste into Termux / proot Ubuntu to remove proxy env, kill daemon, clear metrics.</string>
+    <string name="cleanup_script_hint">Copy and paste into Termux / proot Ubuntu to remove router env, kill daemon, clear metrics.</string>
     <string name="copy_cleanup_script">Copy cleanup script</string>
-    <string name="mitm_enabled">Decrypt HTTPS for token tally (install CA first)</string>
     <string name="providers_title">Providers &amp; keys</string>
-    <string name="providers_hint">Providers are built in — just add keys. The proxy injects the active key per provider and rolls over on 429/401. Secrets stay encrypted on-device.</string>
+    <string name="providers_hint">Providers are built in — just add keys. The router injects the active key per provider and rolls over on 429/401. Secrets stay encrypted on-device.</string>
     <string name="add_key">Add key</string>
     <string name="export_backup">Export backup</string>
     <string name="import_backup">Import backup</string>
-    <string name="export_ca">Export MITM CA</string>
     <string name="events_title">Recent events</string>
     <string name="tokens_line">Tokens: in %1$d / out %2$d (cache r %3$d / w %4$d)</string>
     <string name="hosts_line">Top host: %1$s</string>

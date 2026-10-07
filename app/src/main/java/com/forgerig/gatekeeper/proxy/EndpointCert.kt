@@ -30,7 +30,7 @@ import javax.net.ssl.SSLSocket
  * The TLS identity for our own endpoint: a single self-signed certificate for
  * `127.0.0.1`.
  *
- * This is *not* the MITM CA ([MitmCa]) and the difference matters. The MITM CA
+ * This is *not* a certificate authority and the difference matters. A CA
  * signs a fresh leaf for every host it intercepts, so trusting it means
  * trusting us for *any* name on the internet. This certificate signs nothing
  * but itself and names one address, so a client that trusts it gains the
@@ -44,8 +44,6 @@ import javax.net.ssl.SSLSocket
  * **The SAN must be an IP address, not a DNS name.** Clients validate a
  * connection to `127.0.0.1` by checking the iPAddress SAN; a dNSName SAN
  * makes them reject the certificate as having no valid name for the host.
- * (That is exactly what [MitmCa] emits, and it is correct there, because it
- * only ever names real hostnames.)
  */
 object EndpointCert {
     private const val DIR = "endpoint"
@@ -88,7 +86,7 @@ object EndpointCert {
             kmf.init(ks, STORE_PASS.toCharArray())
             val ctx = SSLContext.getInstance("TLS")
             // No trust manager: this context is server-side only. Upstream
-            // connections keep real verification via MitmCa.upstreamContext().
+            // connections use the platform default verification.
             ctx.init(kmf.keyManagers, null, SecureRandom())
             certificate = cert
             serverContext = ctx

@@ -2,7 +2,7 @@ package com.forgerig.gatekeeper.proxy
 
 /**
  * LLM-only enforcement: this proxy exists to broker LLM API traffic
- * (key injection, rollover, MITM usage scan). Everything else is either
+ * (key injection, rollover, usage scan). Everything else is either
  * tunneled opaque (default, connectivity-preserving) or refused outright
  * (strict mode — clients must bypass via NO_PROXY).
  *

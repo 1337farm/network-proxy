@@ -79,7 +79,7 @@ class GatewayRetargetTest {
 
     @Test
     fun `an intercepted request keeps its own scheme`() {
-        // Forward-proxy/MITM callers do not pass the flag: the client's own
+        // Forward-proxy callers do not pass the flag: the client's own
         // scheme is authoritative there and must not be silently upgraded.
         assertEquals(
             "https://api.anthropic.com/v1/messages",

@@ -329,14 +329,6 @@
                             android:text="@string/import_backup"
                             style="@style/Widget.Material3.Button.OutlinedButton"/>
                     </LinearLayout>
-
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/exportCaButton"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:text="@string/export_ca"
-                        style="@style/Widget.Material3.Button.OutlinedButton"/>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
@@ -374,7 +366,7 @@
                             android:layout_height="wrap_content"
                             android:padding="10dp"
                             style="@style/Text.ScriptBlock"
-                            android:text="No events yet — start the proxy."/>
+                            android:text="No events yet — start the router."/>
                     </ScrollView>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>

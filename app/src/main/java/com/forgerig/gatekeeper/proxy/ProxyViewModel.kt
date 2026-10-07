@@ -56,23 +56,22 @@ class ProxyViewModel : ViewModel() {
         this.context?.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
     }
 
-    fun startProxy(port: Int, metricsEnabled: Boolean, mitmEnabled: Boolean = true) {
-        startProxy(port, metricsEnabled, mitmEnabled, onlyIfStopped = false)
+    fun startProxy(port: Int, metricsEnabled: Boolean) {
+        startProxy(port, metricsEnabled, onlyIfStopped = false)
     }
 
     /**
      * App-start ensure-running: the service no-ops when already up
-     * (no listener flap for a healthy proxy).
+     * (no listener flap for a healthy router).
      */
-    fun ensureRunning(port: Int, metricsEnabled: Boolean, mitmEnabled: Boolean = true) {
-        startProxy(port, metricsEnabled, mitmEnabled, onlyIfStopped = true)
+    fun ensureRunning(port: Int, metricsEnabled: Boolean) {
+        startProxy(port, metricsEnabled, onlyIfStopped = true)
     }
 
-    private fun startProxy(port: Int, metricsEnabled: Boolean, mitmEnabled: Boolean, onlyIfStopped: Boolean) {
+    private fun startProxy(port: Int, metricsEnabled: Boolean, onlyIfStopped: Boolean) {
         val intent = Intent(context, ProxyService::class.java).apply {
             putExtra("port", port)
             putExtra("metricsEnabled", metricsEnabled)
-            putExtra("mitmEnabled", mitmEnabled)
             putExtra(ProxyService.EXTRA_ONLY_IF_STOPPED, onlyIfStopped)
         }
         context?.let {
